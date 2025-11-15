@@ -5,8 +5,14 @@
  * without code deployments. Supports MVP and V2/V3 features.
  */
 
+import * as SecureStore from 'expo-secure-store';
+import Constants from 'expo-constants';
+
 class FeatureFlagService {
   constructor() {
+    // Get feature flags from environment (via Constants.expoConfig.extra or process.env)
+    const extra = Constants.expoConfig?.extra || {};
+    
     // Default flags (MVP configuration)
     this.flags = {
       // MVP features (always enabled)
@@ -22,14 +28,14 @@ class FeatureFlagService {
       pushNotifications: true,
 
       // V2 features (disabled in MVP)
-      multipleGroups: process.env.FEATURE_MULTIPLE_GROUPS === 'true',
-      polls: process.env.FEATURE_POLLS === 'true',
-      privateThreads: process.env.FEATURE_PRIVATE_THREADS === 'true',
-      automatedMessaging: process.env.FEATURE_AUTOMATED_MESSAGING === 'true',
+      multipleGroups: extra.featureMultipleGroups === 'true' || process.env.FEATURE_MULTIPLE_GROUPS === 'true',
+      polls: extra.featurePolls === 'true' || process.env.FEATURE_POLLS === 'true',
+      privateThreads: extra.featurePrivateThreads === 'true' || process.env.FEATURE_PRIVATE_THREADS === 'true',
+      automatedMessaging: extra.featureAutomatedMessaging === 'true' || process.env.FEATURE_AUTOMATED_MESSAGING === 'true',
       projectManagement: false,
 
       // V3 features (disabled in MVP)
-      translation: process.env.FEATURE_TRANSLATION === 'true',
+      translation: extra.featureTranslation === 'true' || process.env.FEATURE_TRANSLATION === 'true',
       currencyConversion: false,
       multiCountrySupport: false,
     };
@@ -90,8 +96,7 @@ class FeatureFlagService {
    */
   async loadFlags() {
     try {
-      const EncryptedStorage = require('react-native-encrypted-storage').default;
-      const storedFlags = await EncryptedStorage.getItem('featureFlags');
+      const storedFlags = await SecureStore.getItemAsync('featureFlags');
       if (storedFlags) {
         const parsed = JSON.parse(storedFlags);
         this.flags = { ...this.flags, ...parsed };
@@ -107,8 +112,7 @@ class FeatureFlagService {
    */
   async saveFlags() {
     try {
-      const EncryptedStorage = require('react-native-encrypted-storage').default;
-      await EncryptedStorage.setItem('featureFlags', JSON.stringify(this.flags));
+      await SecureStore.setItemAsync('featureFlags', JSON.stringify(this.flags));
     } catch (error) {
       console.warn('Failed to save feature flags to storage:', error);
     }
@@ -119,10 +123,13 @@ class FeatureFlagService {
    */
   async syncToBackend() {
     try {
-      const firestore = require('@react-native-firebase/firestore').default();
       // In production, would sync to Firestore admin settings collection
       // For MVP, flags are primarily client-side
-      // await firestore.collection('settings').doc('featureFlags').set(this.flags);
+      // const { firestore } = await import('../config/firebase');
+      // const { doc, setDoc } = await import('firebase/firestore');
+      // if (firestore) {
+      //   await setDoc(doc(firestore, 'settings', 'featureFlags'), this.flags);
+      // }
     } catch (error) {
       console.warn('Failed to sync feature flags to backend:', error);
     }
@@ -133,11 +140,15 @@ class FeatureFlagService {
    */
   async loadFromBackend() {
     try {
-      const firestore = require('@react-native-firebase/firestore').default();
       // In production, would load from Firestore
-      // const doc = await firestore.collection('settings').doc('featureFlags').get();
-      // if (doc.exists) {
-      //   this.flags = { ...this.flags, ...doc.data() };
+      // const { firestore } = await import('../config/firebase');
+      // const { doc, getDoc } = await import('firebase/firestore');
+      // if (firestore) {
+      //   const docRef = doc(firestore, 'settings', 'featureFlags');
+      //   const docSnap = await getDoc(docRef);
+      //   if (docSnap.exists()) {
+      //     this.flags = { ...this.flags, ...docSnap.data() };
+      //   }
       // }
     } catch (error) {
       console.warn('Failed to load feature flags from backend:', error);

@@ -49,23 +49,72 @@ const AuthScreen = () => {
     if (!auth) {
       Alert.alert(
         t('common.error'),
-        'Firebase is not configured. Please set up Firebase config in .env file.'
+        'Firebase Auth is not configured. Please:\n1. Check your .env file has all Firebase config values\n2. Restart the Expo server (npm start)\n3. Ensure Firebase Auth is enabled in Firebase Console'
       );
       setLoading(false);
       return;
     }
 
+    // Debug: Log auth instance info
+    console.log('Auth instance:', auth);
+    console.log('Auth app:', auth?.app?.options?.projectId);
+
     try {
       // Use Firebase SDK v9+ syntax
       if (isLogin) {
         const { signInWithEmailAndPassword } = await import('firebase/auth');
+        console.log('Attempting to sign in...');
         await signInWithEmailAndPassword(auth, email, password);
       } else {
         const { createUserWithEmailAndPassword } = await import('firebase/auth');
-        await createUserWithEmailAndPassword(auth, email, password);
+        console.log('Attempting to create user...');
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        
+        // Create user document in Firestore
+        try {
+          const { firestore } = await import('../config/firebase');
+          const { doc, setDoc } = await import('firebase/firestore');
+          const { createUser } = await import('../models/User');
+          
+          if (firestore && userCredential.user) {
+            const userData = createUser({
+              userId: userCredential.user.uid,
+              email: userCredential.user.email,
+              name: userCredential.user.email?.split('@')[0] || 'User',
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              lastActiveAt: new Date().toISOString(),
+            });
+            
+            const userDocRef = doc(firestore, 'users', userCredential.user.uid);
+            await setDoc(userDocRef, userData);
+            console.log('User document created in Firestore');
+          }
+        } catch (firestoreError) {
+          console.error('Error creating user document in Firestore:', firestoreError);
+          // Don't fail the signup if Firestore creation fails
+        }
       }
     } catch (error) {
-      Alert.alert(t('common.error'), error.message || 'Authentication failed');
+      let errorMessage = error.message || 'Authentication failed';
+      
+      // Provide more helpful error messages
+      if (error.code === 'auth/configuration-not-found') {
+        errorMessage = 'Firebase Authentication is not enabled in Firebase Console.\n\nTo fix this:\n1. Go to https://console.firebase.google.com/\n2. Select your project: mccarthy-pa-agent\n3. Click "Authentication" in the left menu\n4. Click "Get started" (if shown)\n5. Go to "Sign-in method" tab\n6. Click "Email/Password"\n7. Enable "Email/Password" (toggle ON)\n8. Click "Save"\n9. Restart the app';
+      } else if (error.code === 'auth/email-already-in-use') {
+        errorMessage = 'This email is already registered. Please sign in instead.';
+      } else if (error.code === 'auth/weak-password') {
+        errorMessage = 'Password should be at least 6 characters.';
+      } else if (error.code === 'auth/invalid-email') {
+        errorMessage = 'Invalid email address.';
+      } else if (error.code === 'auth/user-not-found') {
+        errorMessage = 'No account found with this email.';
+      } else if (error.code === 'auth/wrong-password') {
+        errorMessage = 'Incorrect password.';
+      }
+      
+      Alert.alert(t('common.error'), errorMessage);
+      console.error('Auth error:', error.code, error.message);
     } finally {
       setLoading(false);
     }

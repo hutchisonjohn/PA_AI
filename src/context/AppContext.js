@@ -14,7 +14,7 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { doc, onSnapshot } from 'firebase/firestore';
 
 import { auth, firestore } from '../config/firebase';
-import { FeatureFlagService } from '../services/FeatureFlagService';
+import FeatureFlagService from '../services/FeatureFlagService';
 import LoggingService from '../services/LoggingService';
 
 const AppContext = createContext(null);
@@ -49,7 +49,7 @@ export const AppProvider = ({ children }) => {
 
   // Initialize feature flags
   useEffect(() => {
-    const flags = FeatureFlagService.getFeatureFlags();
+    const flags = FeatureFlagService.getAllFlags();
     setFeatureFlags(flags);
     LoggingService.debug('Feature flags loaded:', flags);
   }, []);
@@ -93,10 +93,64 @@ export const AppProvider = ({ children }) => {
     }
 
     try {
-      const { doc: firestoreDoc } = await import('firebase/firestore');
-      const userDocRef = firestoreDoc(firestore, 'users', userId);
+      const { doc, getDoc, setDoc } = await import('firebase/firestore');
+      const userDocRef = doc(firestore, 'users', userId);
+
+      // Try to check if document exists (handle offline gracefully)
+      let docSnapshot = null;
+      let documentExists = false;
+      
+      try {
+        docSnapshot = await getDoc(userDocRef);
+        documentExists = docSnapshot.exists();
+      } catch (getDocError) {
+        // Handle offline errors gracefully
+        if (getDocError.code === 'unavailable' || getDocError.message?.includes('offline')) {
+          LoggingService.debug('Firestore is offline, will try to create document when online');
+          // Continue to set up listener - it will work when online
+        } else {
+          // Other errors - log but continue
+          LoggingService.warn('Error checking if user document exists:', getDocError.message);
+        }
+      }
+      
+      // If document doesn't exist and we're online, create it
+      if (!documentExists && docSnapshot !== null) {
+        try {
+          // Get user info from auth
+          const { createUser } = await import('../models/User');
+          const currentUser = auth?.currentUser;
+          
+          if (currentUser && currentUser.uid === userId) {
+            const userData = createUser({
+              userId: currentUser.uid,
+              email: currentUser.email,
+              name: currentUser.email?.split('@')[0] || 'User',
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              lastActiveAt: new Date().toISOString(),
+            });
+            
+            try {
+              await setDoc(userDocRef, userData);
+              LoggingService.debug('User document created in Firestore (auto-created on login)');
+            } catch (setDocError) {
+              if (setDocError.code === 'unavailable' || setDocError.message?.includes('offline')) {
+                LoggingService.debug('Firestore is offline, document will be created when online');
+              } else {
+                throw setDocError;
+              }
+            }
+          } else {
+            LoggingService.warn('Cannot create user document: auth user not available');
+          }
+        } catch (createError) {
+          LoggingService.error('Error creating user document:', createError);
+        }
+      }
 
       // Set up real-time listener for user data
+      // This will work even when offline and sync when online
       const unsubscribe = onSnapshot(
         userDocRef,
         (snapshot) => {
@@ -118,18 +172,49 @@ export const AppProvider = ({ children }) => {
 
             LoggingService.debug('User data loaded:', data);
           } else {
-            LoggingService.warn('User document does not exist');
+            // Document doesn't exist - try to create it if we have auth user
+            if (auth?.currentUser && auth.currentUser.uid === userId) {
+              Promise.all([
+                import('../models/User'),
+                import('firebase/firestore')
+              ]).then(([{ createUser }, { setDoc: setDocFn }]) => {
+                const userData = createUser({
+                  userId: auth.currentUser.uid,
+                  email: auth.currentUser.email,
+                  name: auth.currentUser.email?.split('@')[0] || 'User',
+                  createdAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString(),
+                  lastActiveAt: new Date().toISOString(),
+                });
+                
+                setDocFn(userDocRef, userData).catch((error) => {
+                  if (error.code !== 'unavailable' && !error.message?.includes('offline')) {
+                    LoggingService.error('Error creating user document from snapshot:', error);
+                  }
+                });
+              });
+            }
             setUserData(null);
           }
         },
         (error) => {
-          LoggingService.error('Error loading user data:', error);
+          // Handle offline errors gracefully
+          if (error.code === 'unavailable' || error.message?.includes('offline')) {
+            LoggingService.debug('Firestore listener offline, will sync when connection is restored');
+          } else {
+            LoggingService.error('Error in user data listener:', error);
+          }
         }
       );
 
       return unsubscribe;
     } catch (error) {
-      LoggingService.error('Error setting up user data listener:', error);
+      // Handle offline errors gracefully
+      if (error.code === 'unavailable' || error.message?.includes('offline')) {
+        LoggingService.debug('Firestore is offline, user data will load when connection is restored');
+      } else {
+        LoggingService.error('Error setting up user data listener:', error);
+      }
     }
   }, []);
 
@@ -147,7 +232,7 @@ export const AppProvider = ({ children }) => {
 
   // Refresh feature flags
   const refreshFeatureFlags = useCallback(() => {
-    const flags = FeatureFlagService.getFeatureFlags();
+    const flags = FeatureFlagService.getAllFlags();
     setFeatureFlags(flags);
     LoggingService.debug('Feature flags refreshed:', flags);
   }, []);
