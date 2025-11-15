@@ -5,6 +5,7 @@
 import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { Ionicons } from '@expo/vector-icons';
 
 // Screens (will be created)
 import SplashScreen from '../screens/SplashScreen';
@@ -23,11 +24,30 @@ const Tab = createBottomTabNavigator();
 const MainTabs = () => {
   return (
     <Tab.Navigator
-      screenOptions={{
+      screenOptions={({ route }) => ({
         headerShown: true,
         tabBarActiveTintColor: '#007AFF',
         tabBarInactiveTintColor: '#8E8E93',
-      }}
+        tabBarIcon: ({ focused, color, size }) => {
+          let iconName;
+
+          if (route.name === 'Home') {
+            iconName = focused ? 'home' : 'home-outline';
+          } else if (route.name === 'Tasks') {
+            iconName = focused ? 'checkbox' : 'checkbox-outline';
+          } else if (route.name === 'Calendar') {
+            iconName = focused ? 'calendar' : 'calendar-outline';
+          } else if (route.name === 'Shopping') {
+            iconName = focused ? 'cart' : 'cart-outline';
+          } else if (route.name === 'Messages') {
+            iconName = focused ? 'chatbubbles' : 'chatbubbles-outline';
+          } else if (route.name === 'Settings') {
+            iconName = focused ? 'settings' : 'settings-outline';
+          }
+
+          return <Ionicons name={iconName} size={size} color={color} />;
+        },
+      })}
     >
       <Tab.Screen
         name="Home"
