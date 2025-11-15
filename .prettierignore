@@ -1,0 +1,12 @@
+node_modules/
+.expo/
+dist/
+build/
+coverage/
+*.config.js
+package-lock.json
+yarn.lock
+firebase-debug.log
+.env
+.git/
+

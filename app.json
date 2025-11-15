@@ -1,0 +1,75 @@
+{
+  "expo": {
+    "name": "McCarthy",
+    "slug": "mccarthy-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.mccarthy.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "McCarthy needs your location to provide location-based reminders and notifications.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "McCarthy needs your location to provide location-based reminders and notifications.",
+        "NSMicrophoneUsageDescription": "McCarthy needs microphone access for voice interaction.",
+        "NSSpeechRecognitionUsageDescription": "McCarthy needs speech recognition for voice commands.",
+        "NSCalendarsUsageDescription": "McCarthy needs calendar access to manage your events.",
+        "NSRemindersUsageDescription": "McCarthy needs reminders access to manage your tasks."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.mccarthy.app",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "RECORD_AUDIO",
+        "READ_CALENDAR",
+        "WRITE_CALENDAR",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow McCarthy to use your location for location-based reminders."
+        }
+      ],
+      [
+        "expo-calendar",
+        {
+          "calendarPermission": "Allow McCarthy to access your calendar for event management."
+        }
+      ],
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Allow McCarthy to use your microphone for voice interaction."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": null
+      }
+    }
+  }
+}

@@ -1,0 +1,44 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // User profile photos
+    match /users/{userId}/photos/{photoId} {
+      allow read: if true; // Public read
+      allow write: if isOwner(userId);
+    }
+
+    // Group photos
+    match /groups/{groupId}/photos/{photoId} {
+      allow read: if true;
+      allow write: if isAuthenticated(); // Members can upload
+    }
+
+    // Message attachments (images, voice notes)
+    match /messages/{messageId}/attachments/{attachmentId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+
+    // Voice notes
+    match /voiceNotes/{userId}/{noteId} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(userId);
+    }
+
+    // Shopping list images
+    match /shoppingLists/{listId}/images/{imageId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+  }
+}
+
