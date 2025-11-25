@@ -70,7 +70,8 @@ const AuthScreen = () => {
         console.log('Attempting to create user...');
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);
         
-        // Create user document in Firestore
+        // Create basic user document in Firestore with minimal info
+        // User can complete profile in Settings later
         try {
           const { firestore } = await import('../config/firebase');
           const { doc, setDoc } = await import('firebase/firestore');
@@ -80,7 +81,14 @@ const AuthScreen = () => {
             const userData = createUser({
               userId: userCredential.user.uid,
               email: userCredential.user.email,
-              name: userCredential.user.email?.split('@')[0] || 'User',
+              name: userCredential.user.email?.split('@')[0] || 'User', // Default name from email
+              phoneNumber: null,
+              timezone: 'Australia/Sydney', // Default timezone
+              currency: 'AUD',
+              locale: 'en-AU',
+              groupIds: [],
+              defaultGroupId: null,
+              defaultShoppingListId: null,
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
               lastActiveAt: new Date().toISOString(),

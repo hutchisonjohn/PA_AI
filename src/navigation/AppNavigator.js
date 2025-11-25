@@ -7,7 +7,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 
-// Screens (will be created)
+// Screens
 import SplashScreen from '../screens/SplashScreen';
 import AuthScreen from '../screens/AuthScreen';
 import HomeScreen from '../screens/HomeScreen';
@@ -107,14 +107,16 @@ const AppNavigator = () => {
   const [isAuthenticated, setIsAuthenticated] = React.useState(false);
 
   React.useEffect(() => {
-    // Check authentication status
+    // Check authentication status and profile completion
     const checkAuth = async () => {
       try {
         const firebase = require('../config/firebase');
-        if (firebase.auth) {
+        if (firebase.auth && firebase.firestore) {
           // Use Firebase SDK onAuthStateChanged
           const { onAuthStateChanged } = await import('firebase/auth');
-          const unsubscribe = onAuthStateChanged(firebase.auth, user => {
+          const { doc, getDoc } = await import('firebase/firestore');
+          
+          const unsubscribe = onAuthStateChanged(firebase.auth, async (user) => {
             setIsAuthenticated(!!user);
             setIsLoading(false);
           });

@@ -9,7 +9,7 @@
  * - App settings
  */
 
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, onSnapshot } from 'firebase/firestore';
 
@@ -37,6 +37,9 @@ export const AppProvider = ({ children }) => {
   const [userData, setUserData] = useState(null);
   const [currentGroupId, setCurrentGroupId] = useState(null);
 
+  // Store Firestore listener unsubscribe function
+  const firestoreUnsubscribeRef = useRef(null);
+
   // Feature flags
   const [featureFlags, setFeatureFlags] = useState({});
 
@@ -63,12 +66,21 @@ export const AppProvider = ({ children }) => {
 
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       try {
+        // Clean up previous Firestore listener if it exists
+        if (firestoreUnsubscribeRef.current) {
+          firestoreUnsubscribeRef.current();
+          firestoreUnsubscribeRef.current = null;
+        }
+
         if (firebaseUser) {
           setUser(firebaseUser);
           setIsAuthenticated(true);
           
           // Load user data from Firestore
-          await loadUserData(firebaseUser.uid);
+          const firestoreUnsubscribe = await loadUserData(firebaseUser.uid);
+          if (firestoreUnsubscribe) {
+            firestoreUnsubscribeRef.current = firestoreUnsubscribe;
+          }
         } else {
           setUser(null);
           setIsAuthenticated(false);
@@ -82,13 +94,35 @@ export const AppProvider = ({ children }) => {
       }
     });
 
-    return () => unsubscribe();
-  }, []);
+    return () => {
+      unsubscribe();
+      // Clean up Firestore listener on unmount
+      if (firestoreUnsubscribeRef.current) {
+        firestoreUnsubscribeRef.current();
+        firestoreUnsubscribeRef.current = null;
+      }
+    };
+  }, [loadUserData]);
 
   // Load user data from Firestore
   const loadUserData = useCallback(async (userId) => {
-    if (!firestore) {
-      LoggingService.warn('Firestore not available, skipping user data load');
+    if (!firestore || !auth) {
+      LoggingService.warn('Firestore or Auth not available, skipping user data load');
+      return;
+    }
+
+    // Ensure user is authenticated and token is available
+    const currentUser = auth.currentUser;
+    if (!currentUser || currentUser.uid !== userId) {
+      LoggingService.warn('User not authenticated or userId mismatch, skipping user data load');
+      return;
+    }
+
+    // Wait for auth token to be available
+    try {
+      await currentUser.getIdToken(true); // Force token refresh to ensure it's valid
+    } catch (tokenError) {
+      LoggingService.error('Error getting auth token:', tokenError);
       return;
     }
 
@@ -104,6 +138,11 @@ export const AppProvider = ({ children }) => {
         docSnapshot = await getDoc(userDocRef);
         documentExists = docSnapshot.exists();
       } catch (getDocError) {
+        // Handle permission errors specifically
+        if (getDocError.code === 'permission-denied') {
+          LoggingService.error('Permission denied accessing user document. Check Firestore rules.');
+          return;
+        }
         // Handle offline errors gracefully
         if (getDocError.code === 'unavailable' || getDocError.message?.includes('offline')) {
           LoggingService.debug('Firestore is offline, will try to create document when online');
@@ -119,7 +158,6 @@ export const AppProvider = ({ children }) => {
         try {
           // Get user info from auth
           const { createUser } = await import('../models/User');
-          const currentUser = auth?.currentUser;
           
           if (currentUser && currentUser.uid === userId) {
             const userData = createUser({
@@ -135,6 +173,10 @@ export const AppProvider = ({ children }) => {
               await setDoc(userDocRef, userData);
               LoggingService.debug('User document created in Firestore (auto-created on login)');
             } catch (setDocError) {
+              if (setDocError.code === 'permission-denied') {
+                LoggingService.error('Permission denied creating user document. Check Firestore rules.');
+                return;
+              }
               if (setDocError.code === 'unavailable' || setDocError.message?.includes('offline')) {
                 LoggingService.debug('Firestore is offline, document will be created when online');
               } else {
@@ -188,7 +230,9 @@ export const AppProvider = ({ children }) => {
                 });
                 
                 setDocFn(userDocRef, userData).catch((error) => {
-                  if (error.code !== 'unavailable' && !error.message?.includes('offline')) {
+                  if (error.code === 'permission-denied') {
+                    LoggingService.error('Permission denied creating user document. Check Firestore rules.');
+                  } else if (error.code !== 'unavailable' && !error.message?.includes('offline')) {
                     LoggingService.error('Error creating user document from snapshot:', error);
                   }
                 });
@@ -198,6 +242,12 @@ export const AppProvider = ({ children }) => {
           }
         },
         (error) => {
+          // Handle permission errors specifically
+          if (error.code === 'permission-denied') {
+            LoggingService.error('Permission denied in user data listener. Check Firestore rules and ensure user is authenticated.');
+            // Don't set up listener if permissions are denied
+            return;
+          }
           // Handle offline errors gracefully
           if (error.code === 'unavailable' || error.message?.includes('offline')) {
             LoggingService.debug('Firestore listener offline, will sync when connection is restored');
@@ -209,6 +259,11 @@ export const AppProvider = ({ children }) => {
 
       return unsubscribe;
     } catch (error) {
+      // Handle permission errors specifically
+      if (error.code === 'permission-denied') {
+        LoggingService.error('Permission denied setting up user data listener. Check Firestore rules.');
+        return;
+      }
       // Handle offline errors gracefully
       if (error.code === 'unavailable' || error.message?.includes('offline')) {
         LoggingService.debug('Firestore is offline, user data will load when connection is restored');

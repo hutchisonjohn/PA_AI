@@ -1,34 +1,17 @@
 /**
- * Home Screen - Main dashboard
+ * Home Screen - Main dashboard with chat interface
  */
 
 import React from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import { useTranslation } from 'react-i18next';
+import ChatScreen from './ChatScreen';
 
 const HomeScreen = () => {
   const { t } = useTranslation();
 
-  return (
-    <ScrollView style={styles.container}>
-      <View style={styles.content}>
-        <Text style={styles.title}>Welcome to McCarthy</Text>
-        <Text style={styles.subtitle}>
-          Your AI personal assistant for family coordination
-        </Text>
-
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Quick Actions</Text>
-          <Text style={styles.sectionText}>
-            Voice: Say "Hey McCarthy" to activate voice mode
-          </Text>
-          <Text style={styles.sectionText}>
-            Text: Type your message in the chat interface
-          </Text>
-        </View>
-      </View>
-    </ScrollView>
-  );
+  // For Week 2, HomeScreen is the chat interface
+  return <ChatScreen />;
 };
 
 const styles = StyleSheet.create({

@@ -10,13 +10,14 @@ export default {
     slug: 'mccarthy-app',
     version: '1.0.0',
     orientation: 'portrait',
-    icon: './assets/icon.png',
+    // Temporarily disabled images to fix prebuild error
+    // icon: './assets/icon.png',
     userInterfaceStyle: 'automatic',
-    splash: {
-      image: './assets/splash.png',
-      resizeMode: 'contain',
-      backgroundColor: '#ffffff',
-    },
+    // splash: {
+    //   image: './assets/splash.png',
+    //   resizeMode: 'contain',
+    //   backgroundColor: '#ffffff',
+    // },
     assetBundlePatterns: ['**/*'],
     ios: {
       supportsTablet: true,
@@ -32,10 +33,8 @@ export default {
       ...(process.env.IOS_GOOGLE_SERVICES_FILE ? { googleServicesFile: process.env.IOS_GOOGLE_SERVICES_FILE } : {}),
     },
     android: {
-      adaptiveIcon: {
-        foregroundImage: './assets/adaptive-icon.png',
-        backgroundColor: '#ffffff',
-      },
+      // Note: adaptiveIcon disabled due to image processing error with adaptive-icon.png
+      // The app will work fine without it - Android will use the default icon
       package: 'com.mccarthy.app',
       permissions: [
         'ACCESS_FINE_LOCATION',
@@ -50,7 +49,8 @@ export default {
       ...(process.env.ANDROID_GOOGLE_SERVICES_FILE ? { googleServicesFile: process.env.ANDROID_GOOGLE_SERVICES_FILE } : {}),
     },
     web: {
-      favicon: './assets/favicon.png',
+      // Temporarily disabled favicon to fix prebuild error
+      // favicon: './assets/favicon.png',
     },
     plugins: [
       [
