@@ -20,16 +20,14 @@ import {
   ScrollView,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
-import { doc, setDoc } from 'firebase/firestore';
-
-import { firestore, auth } from '../config/firebase';
-import { createUser } from '../models/User';
+import DartmouthAPI from '../services/DartmouthAPIService';
+import { useAppContext } from '../context/AppContext';
 import TimezonePicker from '../components/TimezonePicker';
 import LoggingService from '../services/LoggingService';
 
 const ProfileSetupScreen = ({ route }) => {
   const navigation = useNavigation();
-  const { userCredential } = route.params || {};
+  const { setUserData } = useAppContext();
 
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
@@ -52,41 +50,21 @@ const ProfileSetupScreen = ({ route }) => {
     setLoading(true);
 
     try {
-      const currentUser = auth?.currentUser || userCredential?.user;
-      
-      if (!currentUser) {
-        Alert.alert('Error', 'User not authenticated');
-        setLoading(false);
-        return;
-      }
-
       const fullName = `${firstName.trim()} ${lastName.trim()}`;
       
-      // Create user document with v7 schema
-      const userData = createUser({
-        userId: currentUser.uid,
-        email: currentUser.email,
+      // Update profile via Dartmouth API
+      const updatedProfile = await DartmouthAPI.updateProfile({
         name: fullName,
         phoneNumber: phoneNumber.trim() || null,
         timezone: timezone,
-        currency: 'AUD',
-        locale: 'en-AU',
-        groupIds: [],
-        defaultGroupId: null,
-        defaultShoppingListId: null,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        lastActiveAt: new Date().toISOString(),
       });
 
-      // Save to Firestore
-      const userDocRef = doc(firestore, 'users', currentUser.uid);
-      await setDoc(userDocRef, userData);
+      LoggingService.debug('User profile updated:', updatedProfile);
 
-      LoggingService.debug('User profile created:', userData);
+      // Update context
+      setUserData(updatedProfile);
 
       // Navigate to main app
-      // The AppNavigator will handle navigation based on auth state
       Alert.alert(
         'Success',
         'Profile created successfully!',

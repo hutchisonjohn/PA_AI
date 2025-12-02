@@ -14,11 +14,9 @@ import {
   Text,
   Platform,
 } from 'react-native';
-import { collection, addDoc, query, where, orderBy, limit, onSnapshot } from 'firebase/firestore';
 
-import { firestore, auth } from '../config/firebase';
 import { useAppContext } from '../context/AppContext';
-import LLMService from '../services/LLMService';
+import DartmouthAPI from '../services/DartmouthAPIService';
 import MessageBubble from '../components/MessageBubble';
 import MessageInput from '../components/MessageInput';
 import LoggingService from '../services/LoggingService';
@@ -37,95 +35,22 @@ const ChatScreen = () => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const flatListRef = useRef(null);
   const conversationHistoryRef = useRef([]);
+  const sessionIdRef = useRef(null);
 
   const userTimezone = userData?.timezone || 'Australia/Sydney';
 
-  // Load conversation history from Firestore
+  // Initialize session ID
   useEffect(() => {
-    if (!firestore || !user) return;
-
-    const conversationsRef = collection(firestore, 'conversations');
-    // Filter by userId in the query itself (required for Firestore security rules)
-    const q = query(
-      conversationsRef,
-      where('userId', '==', user.uid),
-      orderBy('timestamp', 'desc'),
-      limit(50)
-    );
-
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const loadedMessages = [];
-        snapshot.forEach((doc) => {
-          const data = doc.data();
-          // Filter out voice-related error messages (they're just UI feedback, not real messages)
-          const isVoiceError = data.type === 'system' && (
-            data.text?.includes('Voice input requires') ||
-            data.text?.includes('voice input') ||
-            data.text?.includes('development build') ||
-            data.text?.includes('Expo Go does not support')
-          );
-          
-          // Skip voice error messages - they're temporary UI feedback
-          if (isVoiceError) {
-            return;
-          }
-          
-          // All messages in snapshot are already filtered by userId
-          loadedMessages.push({
-            id: doc.id,
-            ...data,
-          });
-        });
-
-        // Sort by timestamp ascending for display
-        loadedMessages.sort((a, b) => {
-          const timeA = a.timestamp?.toDate?.() || new Date(a.timestamp);
-          const timeB = b.timestamp?.toDate?.() || new Date(b.timestamp);
-          return timeA - timeB;
-        });
-
-        setMessages(loadedMessages);
-
-        // Update conversation history for LLM context
-        conversationHistoryRef.current = loadedMessages.slice(-10).map(msg => ({
-          role: msg.type === 'user' ? 'user' : 'assistant',
-          content: msg.text,
-        }));
-
-        // Scroll to bottom
-        setTimeout(() => {
-          flatListRef.current?.scrollToEnd({ animated: true });
-        }, 100);
-      },
-      (error) => {
-        LoggingService.error('Error loading conversation history:', error);
-      }
-    );
-
-    return () => unsubscribe();
-  }, [user, firestore]);
-
-  const saveMessage = async (text, type, metadata = {}) => {
-    if (!firestore || !user) return;
-
-    try {
-      const conversationsRef = collection(firestore, 'conversations');
-      await addDoc(conversationsRef, {
-        userId: user.uid,
-        text: text,
-        type: type, // 'user', 'mccarthy', or 'system'
-        timestamp: new Date(),
-        ...metadata,
-      });
-    } catch (error) {
-      LoggingService.error('Error saving message:', error);
+    if (user && !sessionIdRef.current) {
+      sessionIdRef.current = `pa-ai-${user.uid}-${Date.now()}`;
     }
-  };
+  }, [user]);
+
+  // Messages are stored in local state only (no Firestore)
+  // Dartmouth API handles conversation history via sessionId
 
   const handleSendMessage = async (text) => {
-    if (!text.trim() || isLoading) return;
+    if (!text.trim() || isLoading || !user) return;
 
     // Add user message to UI immediately
     const userMessage = {
@@ -136,47 +61,91 @@ const ChatScreen = () => {
     };
     setMessages(prev => [...prev, userMessage]);
 
-    // Save to Firestore
-    await saveMessage(text, 'user');
+    // Update conversation history
+    conversationHistoryRef.current.push({
+      role: 'user',
+      content: text,
+    });
 
     setIsLoading(true);
     setIsTyping(true);
 
     try {
-      // Get user context
-      const context = {
-        userId: user.uid,
-        timezone: userTimezone,
-        currentTime: TimezoneService.getUserLocalTime(userTimezone).toISO(),
-        location: userData?.homeAddress || 'Unknown',
-      };
+      // Get conversation history for context
+      const history = conversationHistoryRef.current.slice(-10).map(msg => ({
+        role: msg.role,
+        content: msg.content,
+      }));
 
-      // Get conversation history
-      const conversationHistory = conversationHistoryRef.current;
+      // Call Dartmouth API
+      const result = await DartmouthAPI.sendChatMessage(
+        text,
+        sessionIdRef.current,
+        history,
+        {
+          userId: user.uid,
+          timezone: userTimezone,
+          currentTime: TimezoneService.getUserLocalTime(userTimezone).toISO(),
+          location: userData?.homeAddress || 'Unknown',
+        }
+      );
 
-      // Call LLM service
-      const result = await LLMService.processMessage(text, context, conversationHistory);
+      console.log('[ChatScreen] API response:', {
+        hasContent: !!result.content,
+        contentLength: result.content?.length,
+        hasError: !!result.error,
+        sessionId: result.sessionId,
+        metadata: result.metadata,
+        allKeys: Object.keys(result || {}),
+        fullResponse: JSON.stringify(result).substring(0, 500),
+      });
 
-      // Add McCarthy's response
+      // Check for error in response
+      if (result.error) {
+        throw new Error(result.error);
+      }
+
+      // Validate response has content - be very defensive
+      let messageContent = result.content;
+      if (!messageContent || (typeof messageContent === 'string' && messageContent.trim().length === 0)) {
+        console.error('[ChatScreen] Response missing or empty content:', {
+          result,
+          hasContent: !!result.content,
+          contentType: typeof result.content,
+          contentValue: result.content,
+        });
+        // Use a fallback message instead of throwing
+        messageContent = "I apologize, but I'm having trouble processing your message right now. Please try again.";
+        LoggingService.warn('Chat response missing content, using fallback message');
+      } else {
+        messageContent = typeof messageContent === 'string' ? messageContent.trim() : String(messageContent);
+      }
+
+      // Update session ID if returned
+      if (result.sessionId) {
+        sessionIdRef.current = result.sessionId;
+      }
+
+      // Add McCarthy's response (use the validated messageContent)
       const mccarthyMessage = {
         id: `temp-${Date.now()}-response`,
-        text: result.response,
+        text: messageContent, // Use validated content
         type: 'mccarthy',
-        timestamp: new Date(),
-        functionCalls: result.functionCalls,
+        timestamp: new Date(result.timestamp || Date.now()),
       };
       setMessages(prev => [...prev, mccarthyMessage]);
 
-      // Save to Firestore
-      await saveMessage(result.response, 'mccarthy', {
-        functionCalls: result.functionCalls,
+      // Update conversation history
+      conversationHistoryRef.current.push({
+        role: 'assistant',
+        content: mccarthyMessage.text,
       });
 
       // Speak McCarthy's response if voice output is enabled
       if (userData?.voiceSettings?.ttsEnabled !== false) {
         try {
           setIsSpeaking(true);
-          await TextToSpeechService.speak(result.response, {
+          await TextToSpeechService.speak(mccarthyMessage.text, {
             language: 'en-AU',
             rate: userData?.voiceSettings?.ttsSpeed || 1.0,
             onDone: () => {
@@ -192,12 +161,6 @@ const ChatScreen = () => {
           setIsSpeaking(false);
         }
       }
-
-      // TODO: Execute function calls if any
-      if (result.functionCalls && result.functionCalls.length > 0) {
-        LoggingService.debug('Function calls received:', result.functionCalls);
-        // Function execution will be implemented in later tasks
-      }
     } catch (error) {
       LoggingService.error('Error processing message:', error);
       
@@ -209,7 +172,6 @@ const ChatScreen = () => {
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, errorMessage]);
-      await saveMessage(errorMessage.text, 'system');
     } finally {
       setIsLoading(false);
       setIsTyping(false);

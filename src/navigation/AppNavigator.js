@@ -17,6 +17,9 @@ import ShoppingScreen from '../screens/ShoppingScreen';
 import MessagesScreen from '../screens/MessagesScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 
+// Context
+import { useAppContext } from '../context/AppContext';
+
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
 
@@ -103,39 +106,8 @@ const MainTabs = () => {
 
 // Root Stack Navigator
 const AppNavigator = () => {
-  const [isLoading, setIsLoading] = React.useState(true);
-  const [isAuthenticated, setIsAuthenticated] = React.useState(false);
-
-  React.useEffect(() => {
-    // Check authentication status and profile completion
-    const checkAuth = async () => {
-      try {
-        const firebase = require('../config/firebase');
-        if (firebase.auth && firebase.firestore) {
-          // Use Firebase SDK onAuthStateChanged
-          const { onAuthStateChanged } = await import('firebase/auth');
-          const { doc, getDoc } = await import('firebase/firestore');
-          
-          const unsubscribe = onAuthStateChanged(firebase.auth, async (user) => {
-            setIsAuthenticated(!!user);
-            setIsLoading(false);
-          });
-          return () => unsubscribe();
-        } else {
-          // No Firebase auth - skip to app (for testing)
-          setIsAuthenticated(false);
-          setIsLoading(false);
-        }
-      } catch (error) {
-        console.warn('Firebase not available:', error);
-        // No Firebase - show auth screen for testing
-        setIsAuthenticated(false);
-        setIsLoading(false);
-      }
-    };
-    
-    checkAuth();
-  }, []);
+  // Use AppContext for authentication state (works with both Firebase and Dartmouth API)
+  const { isAuthenticated, isLoading } = useAppContext();
 
   if (isLoading) {
     return <SplashScreen />;

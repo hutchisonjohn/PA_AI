@@ -16,17 +16,13 @@ import {
 } from 'react-native';
 import { useTranslation } from 'react-i18next';
 
-// Import Firebase auth with error handling
-let auth = null;
-try {
-  const firebase = require('../config/firebase');
-  auth = firebase.auth;
-} catch (error) {
-  console.warn('Firebase Auth not available:', error);
-}
+// Import Dartmouth API Service
+import DartmouthAPI from '../services/DartmouthAPIService';
+import { useAppContext } from '../context/AppContext';
 
 const AuthScreen = () => {
   const { t } = useTranslation();
+  const { setUser, setUserData, setIsAuthenticated } = useAppContext();
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -46,83 +42,54 @@ const AuthScreen = () => {
 
     setLoading(true);
 
-    if (!auth) {
-      Alert.alert(
-        t('common.error'),
-        'Firebase Auth is not configured. Please:\n1. Check your .env file has all Firebase config values\n2. Restart the Expo server (npm start)\n3. Ensure Firebase Auth is enabled in Firebase Console'
-      );
-      setLoading(false);
-      return;
-    }
-
-    // Debug: Log auth instance info
-    console.log('Auth instance:', auth);
-    console.log('Auth app:', auth?.app?.options?.projectId);
-
     try {
-      // Use Firebase SDK v9+ syntax
+      let result;
+      
       if (isLogin) {
-        const { signInWithEmailAndPassword } = await import('firebase/auth');
-        console.log('Attempting to sign in...');
-        await signInWithEmailAndPassword(auth, email, password);
+        // Login
+        console.log('Attempting to login via Dartmouth API...');
+        result = await DartmouthAPI.login(email, password);
       } else {
-        const { createUserWithEmailAndPassword } = await import('firebase/auth');
-        console.log('Attempting to create user...');
-        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        // Register
+        console.log('Attempting to register via Dartmouth API...');
+        const name = email.split('@')[0]; // Default name from email
+        result = await DartmouthAPI.register(email, password, name, null, 'Australia/Sydney');
+      }
+
+      // Set user in context
+      if (result.user && result.token) {
+        // Set user for auth state
+        setUser({
+          uid: result.user.id,
+          email: result.user.email,
+        });
         
-        // Create basic user document in Firestore with minimal info
-        // User can complete profile in Settings later
-        try {
-          const { firestore } = await import('../config/firebase');
-          const { doc, setDoc } = await import('firebase/firestore');
-          const { createUser } = await import('../models/User');
-          
-          if (firestore && userCredential.user) {
-            const userData = createUser({
-              userId: userCredential.user.uid,
-              email: userCredential.user.email,
-              name: userCredential.user.email?.split('@')[0] || 'User', // Default name from email
-              phoneNumber: null,
-              timezone: 'Australia/Sydney', // Default timezone
-              currency: 'AUD',
-              locale: 'en-AU',
-              groupIds: [],
-              defaultGroupId: null,
-              defaultShoppingListId: null,
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              lastActiveAt: new Date().toISOString(),
-            });
-            
-            const userDocRef = doc(firestore, 'users', userCredential.user.uid);
-            await setDoc(userDocRef, userData);
-            console.log('User document created in Firestore');
-          }
-        } catch (firestoreError) {
-          console.error('Error creating user document in Firestore:', firestoreError);
-          // Don't fail the signup if Firestore creation fails
-        }
+        // Set user data
+        setUserData(result.user);
+        
+        // Set authenticated state
+        setIsAuthenticated(true);
+        
+        console.log('Authentication successful');
       }
     } catch (error) {
       let errorMessage = error.message || 'Authentication failed';
       
       // Provide more helpful error messages
-      if (error.code === 'auth/configuration-not-found') {
-        errorMessage = 'Firebase Authentication is not enabled in Firebase Console.\n\nTo fix this:\n1. Go to https://console.firebase.google.com/\n2. Select your project: mccarthy-pa-agent\n3. Click "Authentication" in the left menu\n4. Click "Get started" (if shown)\n5. Go to "Sign-in method" tab\n6. Click "Email/Password"\n7. Enable "Email/Password" (toggle ON)\n8. Click "Save"\n9. Restart the app';
-      } else if (error.code === 'auth/email-already-in-use') {
+      if (errorMessage.includes('already registered') || errorMessage.includes('Email already')) {
         errorMessage = 'This email is already registered. Please sign in instead.';
-      } else if (error.code === 'auth/weak-password') {
+      } else if (errorMessage.includes('Password must be')) {
         errorMessage = 'Password should be at least 6 characters.';
-      } else if (error.code === 'auth/invalid-email') {
+      } else if (errorMessage.includes('Invalid email')) {
         errorMessage = 'Invalid email address.';
-      } else if (error.code === 'auth/user-not-found') {
+      } else if (errorMessage.includes('Invalid credentials') || errorMessage.includes('user-not-found')) {
         errorMessage = 'No account found with this email.';
-      } else if (error.code === 'auth/wrong-password') {
+      } else if (errorMessage.includes('wrong-password') || errorMessage.includes('Invalid credentials')) {
         errorMessage = 'Incorrect password.';
       }
       
       Alert.alert(t('common.error'), errorMessage);
-      console.error('Auth error:', error.code, error.message);
+      console.error('Auth error:', error.message);
     } finally {
       setLoading(false);
     }

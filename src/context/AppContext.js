@@ -57,7 +57,10 @@ export const AppProvider = ({ children }) => {
     LoggingService.debug('Feature flags loaded:', flags);
   }, []);
 
-  // Listen to authentication state changes
+  // Track if we're using Dartmouth API auth (manual auth) vs Firebase auth
+  const isDartmouthAuthRef = React.useRef(false);
+
+  // Listen to authentication state changes (only for Firebase auth)
   useEffect(() => {
     if (!auth) {
       setIsLoading(false);
@@ -66,6 +69,14 @@ export const AppProvider = ({ children }) => {
 
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       try {
+        // Only handle Firebase auth changes if we're NOT using Dartmouth API auth
+        // This prevents Firebase from clearing Dartmouth API auth state
+        if (isDartmouthAuthRef.current && !firebaseUser) {
+          // We're using Dartmouth API and Firebase has no user - don't clear state
+          setIsLoading(false);
+          return;
+        }
+
         // Clean up previous Firestore listener if it exists
         if (firestoreUnsubscribeRef.current) {
           firestoreUnsubscribeRef.current();
@@ -73,6 +84,8 @@ export const AppProvider = ({ children }) => {
         }
 
         if (firebaseUser) {
+          // Firebase user logged in - clear Dartmouth API flag
+          isDartmouthAuthRef.current = false;
           setUser(firebaseUser);
           setIsAuthenticated(true);
           
@@ -81,7 +94,8 @@ export const AppProvider = ({ children }) => {
           if (firestoreUnsubscribe) {
             firestoreUnsubscribeRef.current = firestoreUnsubscribe;
           }
-        } else {
+        } else if (!isDartmouthAuthRef.current) {
+          // Only clear state if we're using Firebase auth (not Dartmouth API)
           setUser(null);
           setIsAuthenticated(false);
           setUserData(null);
@@ -292,14 +306,29 @@ export const AppProvider = ({ children }) => {
     LoggingService.debug('Feature flags refreshed:', flags);
   }, []);
 
+  // Wrapper for setUser that marks we're using Dartmouth API
+  const setUserDartmouth = React.useCallback((userData) => {
+    isDartmouthAuthRef.current = true;
+    setUser(userData);
+  }, []);
+
+  // Wrapper for setIsAuthenticated that marks we're using Dartmouth API
+  const setIsAuthenticatedDartmouth = React.useCallback((authState) => {
+    isDartmouthAuthRef.current = true;
+    setIsAuthenticated(authState);
+  }, []);
+
   const value = {
     // Auth state
     user,
+    setUser: setUserDartmouth, // Use wrapper that marks Dartmouth API usage
     isAuthenticated,
+    setIsAuthenticated: setIsAuthenticatedDartmouth, // Use wrapper that marks Dartmouth API usage
     isLoading,
 
     // User data
     userData,
+    setUserData, // Expose setUserData for manual auth (Dartmouth API)
     currentGroupId,
     updateCurrentGroup,
 

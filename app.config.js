@@ -45,6 +45,7 @@ export default {
         'WRITE_CALENDAR',
         'READ_EXTERNAL_STORAGE',
         'WRITE_EXTERNAL_STORAGE',
+        'INTERNET',
       ],
       ...(process.env.ANDROID_GOOGLE_SERVICES_FILE ? { googleServicesFile: process.env.ANDROID_GOOGLE_SERVICES_FILE } : {}),
     },
@@ -71,6 +72,7 @@ export default {
           microphonePermission: 'Allow McCarthy to use your microphone for voice interaction.',
         },
       ],
+      './plugins/withNetworkSecurityConfig.js',
     ],
     extra: {
       // Firebase config
@@ -94,6 +96,8 @@ export default {
       // App config
       appEnv: process.env.APP_ENV,
       apiBaseUrl: process.env.API_BASE_URL,
+      // Dartmouth API config
+      dartmouthApiUrl: process.env.DARTMOUTH_API_URL || 'https://dartmouth-os-worker.lucy-hunter-9411.workers.dev',
       // Feature flags
       featureMultipleGroups: process.env.FEATURE_MULTIPLE_GROUPS,
       featurePolls: process.env.FEATURE_POLLS,

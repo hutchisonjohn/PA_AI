@@ -22,16 +22,15 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useTranslation } from 'react-i18next';
-import { doc, updateDoc } from 'firebase/firestore';
 
-import { firestore, auth } from '../config/firebase';
 import { useAppContext } from '../context/AppContext';
 import TimezonePicker from '../components/TimezonePicker';
 import LoggingService from '../services/LoggingService';
+import DartmouthAPI from '../services/DartmouthAPIService';
 
 const SettingsScreen = () => {
   const { t } = useTranslation();
-  const { userData, user } = useAppContext();
+  const { userData, user, setUser, setUserData, setIsAuthenticated } = useAppContext();
 
   // Parse name into first and last name
   const [firstName, setFirstName] = useState('');
@@ -62,11 +61,6 @@ const SettingsScreen = () => {
   }, [userData]);
 
   const handleSave = async () => {
-    if (!auth?.currentUser || !firestore) {
-      Alert.alert('Error', 'Not authenticated or Firestore not available');
-      return;
-    }
-
     // Validate required fields
     if (!firstName.trim()) {
       Alert.alert('Error', 'Please enter your first name');
@@ -83,14 +77,15 @@ const SettingsScreen = () => {
     try {
       const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
       
-      const userDocRef = doc(firestore, 'users', auth.currentUser.uid);
-      
-      await updateDoc(userDocRef, {
+      // Update profile via Dartmouth API
+      const updatedProfile = await DartmouthAPI.updateProfile({
         name: fullName,
         phoneNumber: phoneNumber.trim() || null,
         timezone: timezone,
-        updatedAt: new Date().toISOString(),
       });
+
+      // Update context with new profile data
+      setUserData(updatedProfile);
 
       LoggingService.debug('Profile updated successfully');
 
@@ -107,11 +102,6 @@ const SettingsScreen = () => {
   };
 
   const handleLogout = async () => {
-    if (!auth) {
-      Alert.alert('Error', 'Firebase is not configured');
-      return;
-    }
-
     Alert.alert(
       'Logout',
       'Are you sure you want to logout?',
@@ -122,11 +112,21 @@ const SettingsScreen = () => {
           style: 'destructive',
           onPress: async () => {
             try {
-              const { signOut } = await import('firebase/auth');
-              await signOut(auth);
+              // Logout via Dartmouth API
+              await DartmouthAPI.logout();
+              
+              // Clear user state
+              setUser(null);
+              setUserData(null);
+              setIsAuthenticated(false);
+              
+              LoggingService.debug('Logout successful');
             } catch (error) {
               LoggingService.error('Logout error:', error);
-              Alert.alert('Error', 'Failed to logout');
+              // Clear state even if API call fails
+              setUser(null);
+              setUserData(null);
+              setIsAuthenticated(false);
             }
           },
         },
