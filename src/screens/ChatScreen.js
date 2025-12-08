@@ -23,19 +23,22 @@ import LoggingService from '../services/LoggingService';
 import TimezoneService from '../services/TimezoneService';
 import SpeechRecognitionService from '../services/SpeechRecognitionService';
 import TextToSpeechService from '../services/TextToSpeechService';
-import WakeWordService from '../services/WakeWordService';
 
 const ChatScreen = () => {
   const { user, userData, isAuthenticated } = useAppContext();
-  const voiceErrorShownRef = useRef(false); // Track if we've shown the voice error
   const [messages, setMessages] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState('waiting'); // 'waiting', 'available', 'listening', 'thinking', 'saying'
   const flatListRef = useRef(null);
   const conversationHistoryRef = useRef([]);
   const sessionIdRef = useRef(null);
+  const isProcessingVoiceRef = useRef(false); // Prevent multiple simultaneous voice processing
+  const shouldListenRef = useRef(true); // Flag to control when to listen
+  const isFirstWakeUpRef = useRef(true); // Track if this is the first wake-up (waiting → listening)
+  const voiceStatusRef = useRef('waiting'); // Ref to track current voice status (avoids stale closures)
 
   const userTimezone = userData?.timezone || 'Australia/Sydney';
 
@@ -178,174 +181,373 @@ const ChatScreen = () => {
     }
   };
 
-  // Initialize wake word service
+  // Initialize continuous voice listening
   useEffect(() => {
     if (!isAuthenticated) return;
 
-    const initializeVoiceServices = async () => {
+    const initializeVoiceChat = async () => {
       try {
-        // Initialize wake word detection
-        await WakeWordService.initialize(() => {
-          LoggingService.debug('Wake word detected!');
-          handleWakeWordDetected();
-        });
-
-        // Start listening for wake word if enabled in user settings
-        if (userData?.voiceSettings?.wakeWordEnabled !== false) {
-          await WakeWordService.startListening();
-          WakeWordService.setEnabled(true);
+        // Check if speech recognition is available
+        const isAvailable = await SpeechRecognitionService.isAvailable();
+        if (!isAvailable) {
+          LoggingService.warn('Speech recognition not available');
+          setVoiceStatus('waiting'); // Still show waiting, but voice won't work
+          return;
         }
-      } catch (error) {
-        LoggingService.error('Error initializing voice services:', error);
-      }
-    };
 
-    initializeVoiceServices();
-
-    return () => {
-      WakeWordService.cleanup();
-    };
-  }, [isAuthenticated, userData]);
-
-  const handleWakeWordDetected = async () => {
-    // Show visual feedback
-    setIsListening(true);
-    
-    // Start speech recognition
-    try {
-      await SpeechRecognitionService.startListening(
-        (recognizedText) => {
-          // Speech recognized, send to chat
-          LoggingService.debug('Speech recognized:', recognizedText);
-          setIsListening(false);
-          handleSendMessage(recognizedText);
-        },
-        (error) => {
-          LoggingService.error('Speech recognition error:', error);
-          setIsListening(false);
-          
-          // Show error message
-          const errorMessage = {
-            id: `temp-${Date.now()}-error`,
-            text: `Sorry, I couldn't understand that. Please try again.`,
-            type: 'system',
-            timestamp: new Date(),
-          };
-          setMessages(prev => [...prev, errorMessage]);
+        // Request microphone permissions
+        const hasPermission = await SpeechRecognitionService.requestPermissions();
+        if (!hasPermission) {
+          LoggingService.warn('Microphone permission denied');
+          setVoiceStatus('waiting');
+          return;
         }
-      );
-    } catch (error) {
-      LoggingService.error('Error starting speech recognition:', error);
-      setIsListening(false);
-    }
-  };
 
-  const handleVoicePress = async () => {
-    if (isListening) {
-      // Stop listening
-      await SpeechRecognitionService.stopListening();
-      setIsListening(false);
-      return;
-    }
+        // Start continuous listening
+        setVoiceStatus('waiting');
+        voiceStatusRef.current = 'waiting';
+        shouldListenRef.current = true;
+        isFirstWakeUpRef.current = true; // Reset wake-up flag
+        await SpeechRecognitionService.startContinuousListening(
+          // onSpeechDetected: When user starts speaking (audio detected)
+          () => {
+            // First wake-up: waiting → available
+            if (shouldListenRef.current && isFirstWakeUpRef.current) {
+              LoggingService.debug('[ChatScreen] First wake-up detected, switching to available');
+              setVoiceStatus('available');
+              voiceStatusRef.current = 'available';
+              setIsListening(false);
+              isFirstWakeUpRef.current = false;
+            } 
+            // When in "available" state and user starts speaking: available → listening
+            else if (shouldListenRef.current && voiceStatusRef.current === 'available') {
+              LoggingService.debug('[ChatScreen] User started speaking, switching to listening');
+              setVoiceStatus('listening');
+              voiceStatusRef.current = 'listening';
+              setIsListening(true);
+            }
+          },
+          // onResult: When speech is transcribed
+          async (recognizedText) => {
+            LoggingService.debug('[ChatScreen] Transcription received:', recognizedText, 'Current status:', voiceStatusRef.current);
+            
+            // FIRST WAKE-UP: waiting → available (ignore transcription)
+            if (isFirstWakeUpRef.current) {
+              LoggingService.debug('[ChatScreen] First wake-up transcription ignored, staying in available');
+              setVoiceStatus('available');
+              voiceStatusRef.current = 'available';
+              setIsListening(false);
+              isFirstWakeUpRef.current = false;
+              SpeechRecognitionService.resetProcessingFlag();
+              // Restart listening for next input
+              setTimeout(() => {
+                if (shouldListenRef.current && !isFirstWakeUpRef.current) {
+                  SpeechRecognitionService.startListeningCycle();
+                }
+              }, 500);
+              return;
+            }
+            
+            // Check if we should process
+            if (!shouldListenRef.current || isProcessingVoiceRef.current) {
+              LoggingService.debug('[ChatScreen] Skipping - shouldListen:', shouldListenRef.current, 'isProcessing:', isProcessingVoiceRef.current);
+              return;
+            }
 
-    // Check if speech recognition is available
-    const isAvailable = await SpeechRecognitionService.isAvailable();
-    if (!isAvailable) {
-      // Only show error once per session to avoid spam
-      if (voiceErrorShownRef.current) {
-        LoggingService.debug('Voice input not available - error already shown');
-        return;
-      }
-      
-      voiceErrorShownRef.current = true;
-      
-      // Show user-friendly message based on platform (don't save to Firestore)
-      let errorText;
-      if (Platform.OS === 'web') {
-        errorText = 'Voice input is not available. Please use Chrome, Edge, or Safari browser for Web Speech API support.';
-      } else {
-        errorText = 'Voice input requires OpenAI API key. Please set OPENAI_API_KEY in .env file (same key used for LLM).';
-      }
-      
-      // Show as temporary message (not saved to Firestore)
-      const errorMessage = {
-        id: `temp-voice-error-${Date.now()}`,
-        text: errorText,
-        type: 'system',
-        timestamp: new Date(),
-      };
-      setMessages(prev => [...prev, errorMessage]);
-      
-      // Don't save to Firestore - this is just UI feedback
-      LoggingService.debug('Voice input not available:', errorText);
-      return;
-    }
+            // If in "available" state: available → listening (user is speaking)
+            if (voiceStatusRef.current === 'available') {
+              LoggingService.debug('[ChatScreen] User speaking in available state, switching to listening');
+              setVoiceStatus('listening');
+              voiceStatusRef.current = 'listening';
+              setIsListening(true);
+            }
+            
+            // Only process if in "listening" state
+            if (voiceStatusRef.current !== 'listening') {
+              LoggingService.debug('[ChatScreen] Not in listening state, ignoring. Status:', voiceStatusRef.current);
+              return;
+            }
 
-    // Start manual voice input
-    // Flow: Record → Stop → Check for wake word → Process if found
-    try {
-      setIsListening(true);
-      await SpeechRecognitionService.startListening(
-        (recognizedText, wakeWordDetected) => {
-          LoggingService.debug('Speech recognized:', recognizedText, 'Wake word detected:', wakeWordDetected);
-          setIsListening(false);
-          
-          // Only process if wake word was detected
-          if (wakeWordDetected) {
-            if (recognizedText && recognizedText !== 'Hey McCarthy') {
-              // Has question after wake word - send to LLM
-              handleSendMessage(recognizedText);
-            } else {
-              // Just wake word, no question - show prompt
-              const promptMessage = {
-                id: `temp-${Date.now()}-prompt`,
-                text: 'Hey McCarthy! How can I help you?',
+            // listening → thinking (processing)
+            isProcessingVoiceRef.current = true;
+            shouldListenRef.current = false;
+            setIsListening(false);
+            setVoiceStatus('thinking');
+            voiceStatusRef.current = 'thinking';
+            LoggingService.debug('[ChatScreen] Processing transcription:', recognizedText);
+
+            try {
+              if (recognizedText && recognizedText.trim()) {
+                // Send to LLM and handle response (full STT → LLM → TTS flow)
+                await handleVoiceMessage(recognizedText.trim());
+              } else {
+                // Empty transcription, go back to available
+                LoggingService.debug('[ChatScreen] Empty transcription, going back to available');
+                setVoiceStatus('available');
+                voiceStatusRef.current = 'available';
+                isProcessingVoiceRef.current = false;
+                shouldListenRef.current = true;
+                SpeechRecognitionService.resetProcessingFlag();
+                // Restart listening cycle for continuous mode
+                setTimeout(() => {
+                  if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+                    LoggingService.debug('[ChatScreen] Restarting listening cycle after empty transcription');
+                    SpeechRecognitionService.startListeningCycle();
+                  }
+                }, 500);
+              }
+            } catch (error) {
+              LoggingService.error('[ChatScreen] Error processing voice message:', error);
+              // Reset on error - go to available state
+              setVoiceStatus('available');
+              voiceStatusRef.current = 'available';
+              isProcessingVoiceRef.current = false;
+              shouldListenRef.current = true;
+              SpeechRecognitionService.resetProcessingFlag();
+              // Restart listening cycle
+              setTimeout(() => {
+                if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+                  LoggingService.debug('[ChatScreen] Restarting listening cycle after error');
+                  SpeechRecognitionService.startListeningCycle();
+                }
+              }, 1000);
+            }
+          },
+          // onError: Handle errors
+          (error) => {
+            LoggingService.error('Speech recognition error:', error);
+            // Only update status if we should be listening
+            if (shouldListenRef.current) {
+              // Go to available state on error (not listening)
+              setVoiceStatus('available');
+              voiceStatusRef.current = 'available';
+              setIsListening(false);
+            }
+            isProcessingVoiceRef.current = false;
+            // Restart listening cycle on error
+            setTimeout(() => {
+              if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+                LoggingService.debug('[ChatScreen] Restarting listening cycle after recognition error');
+                SpeechRecognitionService.startListeningCycle();
+              }
+            }, 1000);
+            
+            // Don't show error message for every error (too noisy)
+            // Only show critical errors
+            if (error.message && !error.message.includes('timeout') && !error.message.includes('no-speech')) {
+              const errorMessage = {
+                id: `temp-${Date.now()}-error`,
+                text: `Sorry, I couldn't understand that. Please try again.`,
                 type: 'system',
                 timestamp: new Date(),
               };
-              setMessages(prev => [...prev, promptMessage]);
+              setMessages(prev => [...prev, errorMessage]);
             }
-          } else {
-            // Wake word not detected - show message
-            const noWakeWordMessage = {
-              id: `temp-${Date.now()}-no-wake`,
-              text: 'Wake word not detected. Please say "Hey McCarthy" followed by your question.',
-              type: 'system',
-              timestamp: new Date(),
-            };
-            setMessages(prev => [...prev, noWakeWordMessage]);
           }
-        },
-        (error) => {
-          LoggingService.error('Speech recognition error:', error);
-          setIsListening(false);
-          
-          // Show user-friendly error message (don't save to Firestore)
-          const errorMessage = {
-            id: `temp-speech-error-${Date.now()}`,
-            text: error.message || 'Sorry, I couldn\'t understand that. Please try again or type your message.',
-            type: 'system',
-            timestamp: new Date(),
-          };
-          setMessages(prev => [...prev, errorMessage]);
-          // Don't save to Firestore - this is just UI feedback
+        );
+      } catch (error) {
+        LoggingService.error('Error initializing voice chat:', error);
+        setVoiceStatus('waiting');
+      }
+    };
+
+    initializeVoiceChat();
+
+    return () => {
+      SpeechRecognitionService.stopContinuousListening();
+    };
+  }, [isAuthenticated, userData]);
+
+  // Handle voice message: send to LLM, get response, use TTS
+  const handleVoiceMessage = async (text) => {
+    try {
+      // Add user message to UI immediately (this is the transcribed text)
+      const userMessage = {
+        id: `temp-${Date.now()}`,
+        text: text,
+        type: 'user',
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, userMessage]);
+
+      // Update conversation history
+      conversationHistoryRef.current.push({
+        role: 'user',
+        content: text,
+      });
+
+            // Change status to "thinking"
+      setVoiceStatus('thinking');
+      voiceStatusRef.current = 'thinking';
+      setIsLoading(true);
+      setIsTyping(true);
+
+      // Get conversation history for context
+      const history = conversationHistoryRef.current.slice(-10).map(msg => ({
+        role: msg.role,
+        content: msg.content,
+      }));
+
+      // Call Dartmouth API
+      const result = await DartmouthAPI.sendChatMessage(
+        text,
+        sessionIdRef.current,
+        history,
+        {
+          userId: user.uid,
+          timezone: userTimezone,
+          currentTime: TimezoneService.getUserLocalTime(userTimezone).toISO(),
+          location: userData?.homeAddress || 'Unknown',
         }
       );
+
+      // Check for error in response
+      if (result.error) {
+        throw new Error(result.error);
+      }
+
+      // Validate response has content
+      let messageContent = result.content;
+      if (!messageContent || (typeof messageContent === 'string' && messageContent.trim().length === 0)) {
+        messageContent = "I apologize, but I'm having trouble processing your message right now. Please try again.";
+        LoggingService.warn('Chat response missing content, using fallback message');
+      } else {
+        messageContent = typeof messageContent === 'string' ? messageContent.trim() : String(messageContent);
+      }
+
+      // Update session ID if returned
+      if (result.sessionId) {
+        sessionIdRef.current = result.sessionId;
+      }
+
+      // Add McCarthy's response
+      const mccarthyMessage = {
+        id: `temp-${Date.now()}-response`,
+        text: messageContent,
+        type: 'mccarthy',
+        timestamp: new Date(result.timestamp || Date.now()),
+      };
+      setMessages(prev => [...prev, mccarthyMessage]);
+
+      // Update conversation history
+      conversationHistoryRef.current.push({
+        role: 'assistant',
+        content: mccarthyMessage.text,
+      });
+
+      setIsLoading(false);
+      setIsTyping(false);
+
+      // Change status to "saying"
+      setVoiceStatus('saying');
+      voiceStatusRef.current = 'saying';
+
+      // Speak McCarthy's response if voice output is enabled
+      if (userData?.voiceSettings?.ttsEnabled !== false) {
+        try {
+          setIsSpeaking(true);
+          await TextToSpeechService.speak(mccarthyMessage.text, {
+            language: 'en-AU',
+            rate: userData?.voiceSettings?.ttsSpeed || 1.0,
+            onDone: () => {
+              setIsSpeaking(false);
+              // After TTS completes, go to "available" state first (wait 1 second)
+              setVoiceStatus('available');
+              voiceStatusRef.current = 'available';
+              isProcessingVoiceRef.current = false;
+              shouldListenRef.current = true;
+              
+              // saying → available (cycle complete, ready for next input)
+              SpeechRecognitionService.stopListening().then(() => {
+                SpeechRecognitionService.resetProcessingFlag();
+                // Restart listening - will go to "listening" when user speaks (via onSpeechDetected)
+                setTimeout(() => {
+                  if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+                    SpeechRecognitionService.startListeningCycle();
+                  }
+                }, 500);
+              }).catch(() => {
+                SpeechRecognitionService.resetProcessingFlag();
+                setTimeout(() => {
+                  if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+                    SpeechRecognitionService.startListeningCycle();
+                  }
+                }, 500);
+              });
+            },
+            onError: (error) => {
+              LoggingService.error('[ChatScreen] TTS error:', error);
+              setIsSpeaking(false);
+              // saying → available (on error)
+              setVoiceStatus('available');
+              voiceStatusRef.current = 'available';
+              isProcessingVoiceRef.current = false;
+              shouldListenRef.current = true;
+              SpeechRecognitionService.resetProcessingFlag();
+              setTimeout(() => {
+                if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+                  SpeechRecognitionService.startListeningCycle();
+                }
+              }, 500);
+            },
+          });
+        } catch (error) {
+          LoggingService.error('[ChatScreen] TTS catch error:', error);
+          setIsSpeaking(false);
+          // saying → available (on error)
+          setVoiceStatus('available');
+          voiceStatusRef.current = 'available';
+          isProcessingVoiceRef.current = false;
+          shouldListenRef.current = true;
+          SpeechRecognitionService.resetProcessingFlag();
+          setTimeout(() => {
+            if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+              SpeechRecognitionService.startListeningCycle();
+            }
+          }, 500);
+        }
+      } else {
+        // TTS disabled: thinking → available
+        setVoiceStatus('available');
+        voiceStatusRef.current = 'available';
+        isProcessingVoiceRef.current = false;
+        shouldListenRef.current = true;
+        SpeechRecognitionService.resetProcessingFlag();
+        setTimeout(() => {
+          if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+            SpeechRecognitionService.startListeningCycle();
+          }
+        }, 500);
+      }
     } catch (error) {
-      LoggingService.error('Error starting voice input:', error);
-      setIsListening(false);
+      LoggingService.error('Error processing voice message:', error);
+      setIsLoading(false);
+      setIsTyping(false);
+      setIsSpeaking(false);
       
-      // Show user-friendly error message (don't save to Firestore)
+      // Show error message
       const errorMessage = {
-        id: `temp-voice-start-error-${Date.now()}`,
-        text: 'Error starting voice input. Please try again or type your message.',
+        id: `temp-${Date.now()}-error`,
+        text: `Sorry, I encountered an error: ${error.message}`,
         type: 'system',
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, errorMessage]);
-      // Don't save to Firestore - this is just UI feedback
+      
+      // thinking → available (on error)
+      setVoiceStatus('available');
+      voiceStatusRef.current = 'available';
+      isProcessingVoiceRef.current = false;
+      shouldListenRef.current = true;
+      SpeechRecognitionService.resetProcessingFlag();
+      setTimeout(() => {
+        if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+          SpeechRecognitionService.startListeningCycle();
+        }
+      }, 1000);
     }
   };
+
 
   if (!isAuthenticated) {
     return (
@@ -370,22 +572,34 @@ const ChatScreen = () => {
         }}
         ListFooterComponent={
           <>
-            {isTyping && (
-              <View style={styles.typingContainer}>
+            {voiceStatus === 'waiting' && (
+              <View style={styles.waitingContainer}>
                 <ActivityIndicator size="small" color="#8E8E93" />
-                <Text style={styles.typingText}>McCarthy is typing...</Text>
+                <Text style={styles.waitingText}>Waiting...</Text>
               </View>
             )}
-            {isListening && (
+            {voiceStatus === 'available' && (
+              <View style={styles.availableContainer}>
+                <ActivityIndicator size="small" color="#34C759" />
+                <Text style={styles.availableText}>Available...</Text>
+              </View>
+            )}
+            {voiceStatus === 'listening' && (
               <View style={styles.listeningContainer}>
                 <ActivityIndicator size="small" color="#007AFF" />
                 <Text style={styles.listeningText}>Listening...</Text>
               </View>
             )}
-            {isSpeaking && (
-              <View style={styles.speakingContainer}>
+            {voiceStatus === 'thinking' && (
+              <View style={styles.thinkingContainer}>
+                <ActivityIndicator size="small" color="#FF9500" />
+                <Text style={styles.thinkingText}>Thinking...</Text>
+              </View>
+            )}
+            {voiceStatus === 'saying' && (
+              <View style={styles.sayingContainer}>
                 <ActivityIndicator size="small" color="#34C759" />
-                <Text style={styles.speakingText}>McCarthy is speaking...</Text>
+                <Text style={styles.sayingText}>Saying...</Text>
               </View>
             )}
           </>
@@ -394,9 +608,9 @@ const ChatScreen = () => {
       
       <MessageInput
         onSend={handleSendMessage}
-        onVoicePress={handleVoicePress}
-        disabled={isLoading || isSpeaking}
-        placeholder={isListening ? "Listening..." : "Ask McCarthy anything..."}
+        onVoicePress={null}
+        disabled={isLoading || isSpeaking || isListening}
+        placeholder="Type a message (voice is always listening)..."
       />
     </View>
   );
@@ -450,6 +664,54 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     color: '#8E8E93',
     marginTop: 20,
+  },
+  waitingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  waitingText: {
+    marginLeft: 8,
+    fontSize: 12,
+    color: '#8E8E93',
+    fontStyle: 'italic',
+  },
+  availableContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  availableText: {
+    marginLeft: 8,
+    fontSize: 12,
+    color: '#34C759',
+    fontStyle: 'italic',
+  },
+  thinkingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  thinkingText: {
+    marginLeft: 8,
+    fontSize: 12,
+    color: '#FF9500',
+    fontStyle: 'italic',
+  },
+  sayingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  sayingText: {
+    marginLeft: 8,
+    fontSize: 12,
+    color: '#34C759',
+    fontStyle: 'italic',
   },
 });
 
