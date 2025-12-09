@@ -479,6 +479,72 @@ class DartmouthAPIService {
   }
 
   /**
+   * Get chat history for the current user
+   * GET /api/pa-ai/chat/history
+   * 
+   * @param {number} limit - Number of records to return (default: 50)
+   * @param {number} offset - Offset for pagination (default: 0)
+   * @returns {Promise<Object>} Chat history with pagination info
+   */
+  async getChatHistory(limit = 50, offset = 0) {
+    try {
+      const headers = await this.getAuthHeaders();
+      
+      const response = await this.axios.get(
+        `/api/pa-ai/chat/history?limit=${limit}&offset=${offset}`,
+        {
+          timeout: 15000, // 15 seconds timeout
+          headers,
+        }
+      );
+
+      return response.data;
+    } catch (error) {
+      console.error('[Dartmouth API] Get chat history error:', error.message);
+      if (error.response) {
+        const errorData = error.response.data;
+        throw new Error(errorData?.error || `HTTP ${error.response.status}: ${error.response.statusText}`);
+      }
+      throw new Error(error.message || 'Failed to get chat history');
+    }
+  }
+
+  /**
+   * Save chat history (Q&A pair)
+   * POST /api/pa-ai/chat/history
+   * 
+   * Called when TTS starts speaking (meaning answer is successfully generated)
+   */
+  async saveChatHistory(question, answer, sessionId = null, metadata = {}) {
+    try {
+      const headers = await this.getAuthHeaders();
+      
+      const response = await this.axios.post(
+        '/api/pa-ai/chat/history',
+        {
+          question,
+          answer,
+          sessionId,
+          metadata,
+        },
+        {
+          timeout: 10000, // 10 seconds timeout
+          headers,
+        }
+      );
+
+      return response.data;
+    } catch (error) {
+      console.error('[Dartmouth API] Save chat history error:', error.message);
+      if (error.response) {
+        const errorData = error.response.data;
+        throw new Error(errorData?.error || `HTTP ${error.response.status}: ${error.response.statusText}`);
+      }
+      throw new Error(error.message || 'Failed to save chat history');
+    }
+  }
+
+  /**
    * Check if user is authenticated
    */
   async isAuthenticated() {

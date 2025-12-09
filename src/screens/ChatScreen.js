@@ -13,12 +13,15 @@ import {
   ActivityIndicator,
   Text,
   Platform,
+  TouchableOpacity,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 
 import { useAppContext } from '../context/AppContext';
 import DartmouthAPI from '../services/DartmouthAPIService';
 import MessageBubble from '../components/MessageBubble';
 import MessageInput from '../components/MessageInput';
+import ChatHistoryModal from '../components/ChatHistoryModal';
 import LoggingService from '../services/LoggingService';
 import TimezoneService from '../services/TimezoneService';
 import SpeechRecognitionService from '../services/SpeechRecognitionService';
@@ -31,14 +34,16 @@ const ChatScreen = () => {
   const [isTyping, setIsTyping] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [voiceStatus, setVoiceStatus] = useState('waiting'); // 'waiting', 'available', 'listening', 'thinking', 'saying'
+  const [voiceStatus, setVoiceStatus] = useState('disabled'); // 'disabled', 'waiting', 'available', 'listening', 'thinking', 'saying'
+  const [isVoiceEnabled, setIsVoiceEnabled] = useState(false); // Mic button state - voice disabled by default
+  const [isHistoryModalVisible, setIsHistoryModalVisible] = useState(false);
   const flatListRef = useRef(null);
   const conversationHistoryRef = useRef([]);
   const sessionIdRef = useRef(null);
   const isProcessingVoiceRef = useRef(false); // Prevent multiple simultaneous voice processing
-  const shouldListenRef = useRef(true); // Flag to control when to listen
+  const shouldListenRef = useRef(false); // Flag to control when to listen - starts as false (voice disabled)
   const isFirstWakeUpRef = useRef(true); // Track if this is the first wake-up (waiting → listening)
-  const voiceStatusRef = useRef('waiting'); // Ref to track current voice status (avoids stale closures)
+  const voiceStatusRef = useRef('disabled'); // Ref to track current voice status (avoids stale closures)
 
   const userTimezone = userData?.timezone || 'Australia/Sydney';
 
@@ -51,6 +56,27 @@ const ChatScreen = () => {
 
   // Messages are stored in local state only (no Firestore)
   // Dartmouth API handles conversation history via sessionId
+
+  // Save chat history to Cloudflare database
+  const saveChatHistory = async (question, answer, sessionId, metadata = {}) => {
+    try {
+      if (!user || !question || !answer) {
+        LoggingService.warn('Cannot save chat history: missing user, question, or answer');
+        return;
+      }
+
+      const response = await DartmouthAPI.saveChatHistory(question, answer, sessionId, metadata);
+      
+      if (response.success) {
+        LoggingService.debug('Chat history saved successfully:', response.id);
+      } else {
+        LoggingService.warn('Chat history save returned non-success:', response);
+      }
+    } catch (error) {
+      LoggingService.error('Error saving chat history:', error);
+      // Don't throw - we don't want to break the chat flow if save fails
+    }
+  };
 
   const handleSendMessage = async (text) => {
     if (!text.trim() || isLoading || !user) return;
@@ -151,6 +177,19 @@ const ChatScreen = () => {
           await TextToSpeechService.speak(mccarthyMessage.text, {
             language: 'en-AU',
             rate: userData?.voiceSettings?.ttsSpeed || 1.0,
+            onStart: async () => {
+              // Save chat history when TTS starts speaking (answer is successfully generated)
+              try {
+                await saveChatHistory(text, mccarthyMessage.text, sessionIdRef.current, {
+                  timezone: userTimezone,
+                  location: userData?.homeAddress || 'Unknown',
+                  timestamp: mccarthyMessage.timestamp.toISOString(),
+                });
+              } catch (saveError) {
+                // Don't fail TTS if save fails - just log it
+                LoggingService.error('Failed to save chat history:', saveError);
+              }
+            },
             onDone: () => {
               setIsSpeaking(false);
             },
@@ -162,6 +201,17 @@ const ChatScreen = () => {
         } catch (error) {
           LoggingService.error('Error speaking response:', error);
           setIsSpeaking(false);
+        }
+      } else {
+        // TTS disabled - still save chat history since answer was successfully generated
+        try {
+          await saveChatHistory(text, mccarthyMessage.text, sessionIdRef.current, {
+            timezone: userTimezone,
+            location: userData?.homeAddress || 'Unknown',
+            timestamp: mccarthyMessage.timestamp.toISOString(),
+          });
+        } catch (saveError) {
+          LoggingService.error('Failed to save chat history:', saveError);
         }
       }
     } catch (error) {
@@ -181,11 +231,34 @@ const ChatScreen = () => {
     }
   };
 
-  // Initialize continuous voice listening
-  useEffect(() => {
+  // Toggle voice on/off with mic button
+  const toggleVoice = async () => {
+    if (isVoiceEnabled) {
+      // Disable voice - stop listening
+      setIsVoiceEnabled(false);
+      setVoiceStatus('disabled');
+      voiceStatusRef.current = 'disabled';
+      shouldListenRef.current = false;
+      isProcessingVoiceRef.current = false;
+      
+      try {
+        await SpeechRecognitionService.stopContinuousListening();
+        LoggingService.debug('[ChatScreen] Voice disabled - stopped continuous listening');
+      } catch (error) {
+        LoggingService.error('[ChatScreen] Error stopping voice:', error);
+      }
+    } else {
+      // Enable voice - start listening
+      setIsVoiceEnabled(true);
+      await initializeVoiceChat();
+    }
+  };
+
+  // Initialize continuous voice listening (only when voice is enabled)
+  const initializeVoiceChat = async () => {
     if (!isAuthenticated) return;
 
-    const initializeVoiceChat = async () => {
+    try {
       try {
         // Check if speech recognition is available
         const isAvailable = await SpeechRecognitionService.isAvailable();
@@ -260,7 +333,7 @@ const ChatScreen = () => {
                 SpeechRecognitionService.resetProcessingFlag();
                 // Restart listening for next input (now in available state)
                 setTimeout(() => {
-                  if (shouldListenRef.current && !isFirstWakeUpRef.current) {
+                  if (isVoiceEnabled && shouldListenRef.current && !isFirstWakeUpRef.current) {
                     SpeechRecognitionService.startListeningCycle();
                   }
                 }, 500);
@@ -284,7 +357,7 @@ const ChatScreen = () => {
                 // Restart listening cycle to continue waiting for wake word
                 // Use a longer delay to ensure service is fully stopped
                 setTimeout(async () => {
-                  if (shouldListenRef.current && voiceStatusRef.current === 'waiting') {
+                  if (isVoiceEnabled && shouldListenRef.current && voiceStatusRef.current === 'waiting') {
                     LoggingService.debug('[ChatScreen] Restarting listening cycle after wake word not detected');
                     try {
                       await SpeechRecognitionService.startListeningCycle();
@@ -292,7 +365,7 @@ const ChatScreen = () => {
                       LoggingService.error('[ChatScreen] Error restarting listening cycle:', error);
                       // Try again after another delay
                       setTimeout(async () => {
-                        if (shouldListenRef.current && voiceStatusRef.current === 'waiting') {
+                        if (isVoiceEnabled && shouldListenRef.current && voiceStatusRef.current === 'waiting') {
                           await SpeechRecognitionService.startListeningCycle();
                         }
                       }, 2000);
@@ -303,9 +376,9 @@ const ChatScreen = () => {
               }
             }
             
-            // Check if we should process
-            if (!shouldListenRef.current || isProcessingVoiceRef.current) {
-              LoggingService.debug('[ChatScreen] Skipping - shouldListen:', shouldListenRef.current, 'isProcessing:', isProcessingVoiceRef.current);
+            // Check if we should process (voice must be enabled)
+            if (!isVoiceEnabled || !shouldListenRef.current || isProcessingVoiceRef.current) {
+              LoggingService.debug('[ChatScreen] Skipping - voiceEnabled:', isVoiceEnabled, 'shouldListen:', shouldListenRef.current, 'isProcessing:', isProcessingVoiceRef.current);
               return;
             }
 
@@ -345,7 +418,7 @@ const ChatScreen = () => {
                 SpeechRecognitionService.resetProcessingFlag();
                 // Restart listening cycle for continuous mode
                 setTimeout(() => {
-                  if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+                  if (isVoiceEnabled && shouldListenRef.current && !isProcessingVoiceRef.current) {
                     LoggingService.debug('[ChatScreen] Restarting listening cycle after empty transcription');
                     SpeechRecognitionService.startListeningCycle();
                   }
@@ -361,7 +434,7 @@ const ChatScreen = () => {
               SpeechRecognitionService.resetProcessingFlag();
               // Restart listening cycle
               setTimeout(() => {
-                if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+                if (isVoiceEnabled && shouldListenRef.current && !isProcessingVoiceRef.current) {
                   LoggingService.debug('[ChatScreen] Restarting listening cycle after error');
                   SpeechRecognitionService.startListeningCycle();
                 }
@@ -371,17 +444,17 @@ const ChatScreen = () => {
           // onError: Handle errors
           (error) => {
             LoggingService.error('Speech recognition error:', error);
-            // Only update status if we should be listening
-            if (shouldListenRef.current) {
+            // Only update status if voice is enabled and we should be listening
+            if (isVoiceEnabled && shouldListenRef.current) {
               // Go to available state on error (not listening)
               setVoiceStatus('available');
               voiceStatusRef.current = 'available';
               setIsListening(false);
             }
             isProcessingVoiceRef.current = false;
-            // Restart listening cycle on error
+            // Restart listening cycle on error (only if voice is enabled)
             setTimeout(() => {
-              if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+              if (isVoiceEnabled && shouldListenRef.current && !isProcessingVoiceRef.current) {
                 LoggingService.debug('[ChatScreen] Restarting listening cycle after recognition error');
                 SpeechRecognitionService.startListeningCycle();
               }
@@ -404,14 +477,30 @@ const ChatScreen = () => {
         LoggingService.error('Error initializing voice chat:', error);
         setVoiceStatus('waiting');
       }
-    };
+    } catch (error) {
+      LoggingService.error('[ChatScreen] Error initializing voice chat:', error);
+      setVoiceStatus('disabled');
+      setIsVoiceEnabled(false);
+    }
+  };
+
+  // Only initialize voice when enabled and authenticated
+  useEffect(() => {
+    if (!isAuthenticated || !isVoiceEnabled) {
+      return;
+    }
 
     initializeVoiceChat();
 
     return () => {
-      SpeechRecognitionService.stopContinuousListening();
+      // Cleanup: stop listening when component unmounts or voice is disabled
+      if (isVoiceEnabled) {
+        SpeechRecognitionService.stopContinuousListening().catch(() => {
+          // Ignore errors during cleanup
+        });
+      }
     };
-  }, [isAuthenticated, userData]);
+  }, [isAuthenticated, userData, isVoiceEnabled]);
 
   // Handle voice message: send to LLM, get response, use TTS
   const handleVoiceMessage = async (text) => {
@@ -504,6 +593,19 @@ const ChatScreen = () => {
           await TextToSpeechService.speak(mccarthyMessage.text, {
             language: 'en-AU',
             rate: userData?.voiceSettings?.ttsSpeed || 1.0,
+            onStart: async () => {
+              // Save chat history when TTS starts speaking (answer is successfully generated)
+              try {
+                await saveChatHistory(text, mccarthyMessage.text, sessionIdRef.current, {
+                  timezone: userTimezone,
+                  location: userData?.homeAddress || 'Unknown',
+                  timestamp: mccarthyMessage.timestamp.toISOString(),
+                });
+              } catch (saveError) {
+                // Don't fail TTS if save fails - just log it
+                LoggingService.error('[ChatScreen] Failed to save chat history:', saveError);
+              }
+            },
             onDone: () => {
               setIsSpeaking(false);
               // After TTS completes, go to "available" state first (wait 1 second)
@@ -517,14 +619,14 @@ const ChatScreen = () => {
                 SpeechRecognitionService.resetProcessingFlag();
                 // Restart listening - will go to "listening" when user speaks (via onSpeechDetected)
                 setTimeout(() => {
-                  if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+                  if (isVoiceEnabled && shouldListenRef.current && !isProcessingVoiceRef.current) {
                     SpeechRecognitionService.startListeningCycle();
                   }
                 }, 500);
               }).catch(() => {
                 SpeechRecognitionService.resetProcessingFlag();
                 setTimeout(() => {
-                  if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+                  if (isVoiceEnabled && shouldListenRef.current && !isProcessingVoiceRef.current) {
                     SpeechRecognitionService.startListeningCycle();
                   }
                 }, 500);
@@ -540,7 +642,7 @@ const ChatScreen = () => {
               shouldListenRef.current = true;
               SpeechRecognitionService.resetProcessingFlag();
               setTimeout(() => {
-                if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+                if (isVoiceEnabled && shouldListenRef.current && !isProcessingVoiceRef.current) {
                   SpeechRecognitionService.startListeningCycle();
                 }
               }, 500);
@@ -556,23 +658,41 @@ const ChatScreen = () => {
           shouldListenRef.current = true;
           SpeechRecognitionService.resetProcessingFlag();
           setTimeout(() => {
-            if (shouldListenRef.current && !isProcessingVoiceRef.current) {
+            if (isVoiceEnabled && shouldListenRef.current && !isProcessingVoiceRef.current) {
               SpeechRecognitionService.startListeningCycle();
             }
           }, 500);
         }
       } else {
         // TTS disabled: thinking → available
-        setVoiceStatus('available');
-        voiceStatusRef.current = 'available';
-        isProcessingVoiceRef.current = false;
-        shouldListenRef.current = true;
-        SpeechRecognitionService.resetProcessingFlag();
-        setTimeout(() => {
-          if (shouldListenRef.current && !isProcessingVoiceRef.current) {
-            SpeechRecognitionService.startListeningCycle();
-          }
-        }, 500);
+        // Still save chat history since answer was successfully generated
+        try {
+          await saveChatHistory(text, mccarthyMessage.text, sessionIdRef.current, {
+            timezone: userTimezone,
+            location: userData?.homeAddress || 'Unknown',
+            timestamp: mccarthyMessage.timestamp.toISOString(),
+          });
+        } catch (saveError) {
+          LoggingService.error('[ChatScreen] Failed to save chat history:', saveError);
+        }
+        
+        // Only set to available if voice is enabled
+        if (isVoiceEnabled) {
+          setVoiceStatus('available');
+          voiceStatusRef.current = 'available';
+          isProcessingVoiceRef.current = false;
+          shouldListenRef.current = true;
+          SpeechRecognitionService.resetProcessingFlag();
+          setTimeout(() => {
+            if (isVoiceEnabled && shouldListenRef.current && !isProcessingVoiceRef.current) {
+              SpeechRecognitionService.startListeningCycle();
+            }
+          }, 500);
+        } else {
+          // Voice disabled - just reset processing flags
+          isProcessingVoiceRef.current = false;
+          shouldListenRef.current = false;
+        }
       }
     } catch (error) {
       LoggingService.error('Error processing voice message:', error);
@@ -589,17 +709,23 @@ const ChatScreen = () => {
       };
       setMessages(prev => [...prev, errorMessage]);
       
-      // thinking → available (on error)
-      setVoiceStatus('available');
-      voiceStatusRef.current = 'available';
-      isProcessingVoiceRef.current = false;
-      shouldListenRef.current = true;
-      SpeechRecognitionService.resetProcessingFlag();
-      setTimeout(() => {
-        if (shouldListenRef.current && !isProcessingVoiceRef.current) {
-          SpeechRecognitionService.startListeningCycle();
-        }
-      }, 1000);
+      // thinking → available (on error) - only if voice is enabled
+      if (isVoiceEnabled) {
+        setVoiceStatus('available');
+        voiceStatusRef.current = 'available';
+        isProcessingVoiceRef.current = false;
+        shouldListenRef.current = true;
+        SpeechRecognitionService.resetProcessingFlag();
+        setTimeout(() => {
+          if (isVoiceEnabled && shouldListenRef.current && !isProcessingVoiceRef.current) {
+            SpeechRecognitionService.startListeningCycle();
+          }
+        }, 1000);
+      } else {
+        // Voice disabled - just reset processing flags
+        isProcessingVoiceRef.current = false;
+        shouldListenRef.current = false;
+      }
     }
   };
 
@@ -614,6 +740,39 @@ const ChatScreen = () => {
 
   return (
     <View style={styles.container}>
+      {/* Header with Mic Button and History Button */}
+      <View style={styles.headerContainer}>
+        <View style={styles.micButtonContainer}>
+          <TouchableOpacity
+            style={[
+              styles.micButton,
+              isVoiceEnabled && styles.micButtonEnabled,
+              (isLoading || isSpeaking) && styles.micButtonDisabled
+            ]}
+            onPress={toggleVoice}
+            disabled={isLoading || isSpeaking}
+          >
+            <Ionicons
+              name={isVoiceEnabled ? "mic" : "mic-off"}
+              size={24}
+              color={isVoiceEnabled ? "#FFFFFF" : "#8E8E93"}
+            />
+          </TouchableOpacity>
+          <Text style={styles.micButtonLabel}>
+            {isVoiceEnabled ? "Voice On" : "Voice Off"}
+          </Text>
+        </View>
+
+        {/* History Button */}
+        <TouchableOpacity
+          style={styles.historyButton}
+          onPress={() => setIsHistoryModalVisible(true)}
+          disabled={isLoading || isSpeaking}
+        >
+          <Ionicons name="time-outline" size={24} color="#007AFF" />
+        </TouchableOpacity>
+      </View>
+
       <FlatList
         ref={flatListRef}
         data={messages}
@@ -627,31 +786,32 @@ const ChatScreen = () => {
         }}
         ListFooterComponent={
           <>
-            {voiceStatus === 'waiting' && (
+            {/* Only show voice status when voice is enabled */}
+            {isVoiceEnabled && voiceStatus === 'waiting' && (
               <View style={styles.waitingContainer}>
                 <ActivityIndicator size="small" color="#8E8E93" />
-                <Text style={styles.waitingText}>Waiting...</Text>
+                <Text style={styles.waitingText}>Waiting for wake word...</Text>
               </View>
             )}
-            {voiceStatus === 'available' && (
+            {isVoiceEnabled && voiceStatus === 'available' && (
               <View style={styles.availableContainer}>
                 <ActivityIndicator size="small" color="#34C759" />
-                <Text style={styles.availableText}>Available...</Text>
+                <Text style={styles.availableText}>Available - Speak now...</Text>
               </View>
             )}
-            {voiceStatus === 'listening' && (
+            {isVoiceEnabled && voiceStatus === 'listening' && (
               <View style={styles.listeningContainer}>
                 <ActivityIndicator size="small" color="#007AFF" />
                 <Text style={styles.listeningText}>Listening...</Text>
               </View>
             )}
-            {voiceStatus === 'thinking' && (
+            {isVoiceEnabled && voiceStatus === 'thinking' && (
               <View style={styles.thinkingContainer}>
                 <ActivityIndicator size="small" color="#FF9500" />
                 <Text style={styles.thinkingText}>Thinking...</Text>
               </View>
             )}
-            {voiceStatus === 'saying' && (
+            {isVoiceEnabled && voiceStatus === 'saying' && (
               <View style={styles.sayingContainer}>
                 <ActivityIndicator size="small" color="#34C759" />
                 <Text style={styles.sayingText}>Saying...</Text>
@@ -665,7 +825,14 @@ const ChatScreen = () => {
         onSend={handleSendMessage}
         onVoicePress={null}
         disabled={isLoading || isSpeaking || isListening}
-        placeholder="Type a message (voice is always listening)..."
+        placeholder={isVoiceEnabled ? "Type a message or speak..." : "Type a message..."}
+      />
+
+      {/* Chat History Modal */}
+      <ChatHistoryModal
+        visible={isHistoryModalVisible}
+        onClose={() => setIsHistoryModalVisible(false)}
+        userTimezone={userTimezone}
       />
     </View>
   );
@@ -675,6 +842,50 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#FFFFFF',
+  },
+  headerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: '#F5F5F5',
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5E5EA',
+  },
+  micButtonContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  micButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#E5E5EA',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  micButtonEnabled: {
+    backgroundColor: '#007AFF',
+  },
+  micButtonDisabled: {
+    opacity: 0.5,
+  },
+  micButtonLabel: {
+    fontSize: 14,
+    color: '#000000',
+    fontWeight: '500',
+  },
+  historyButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#E5E5EA',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 12,
   },
   messagesList: {
     paddingVertical: 16,
