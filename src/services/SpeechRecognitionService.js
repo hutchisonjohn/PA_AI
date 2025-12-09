@@ -583,15 +583,22 @@ class SpeechRecognitionService {
       LoggingService.debug('Recording stopped, sending to OpenAI Whisper API:', recordingUri);
 
       // Send audio to OpenAI Whisper API and get transcript
-      const transcript = await this.transcribeWithWhisper(recordingUri);
+      let transcript = '';
+      try {
+        transcript = await this.transcribeWithWhisper(recordingUri);
+      } catch (transcribeError) {
+        // Log the error but don't throw - we'll handle empty transcript below
+        LoggingService.warn('[SpeechRecognition] Transcription error (will treat as empty):', transcribeError.message);
+        transcript = ''; // Treat errors as empty transcript
+      }
       
       // Store transcript and callback before clearing flags
-      const transcriptText = transcript?.trim();
+      const transcriptText = transcript?.trim() || '';
       // Use the continuous callback, not the one from startListening (which gets overwritten)
       const callback = this.isContinuousListening ? this.continuousOnResultCallback : this.onResultCallback;
       const wasContinuous = this.isContinuousListening;
       
-      LoggingService.debug('[SpeechRecognition] Transcription complete:', transcriptText);
+      LoggingService.debug('[SpeechRecognition] Transcription complete:', transcriptText || '(empty)');
       
       // Clear the recording reference BEFORE calling callback
       // This prevents any recursive calls from accessing the recording
@@ -599,6 +606,11 @@ class SpeechRecognitionService {
       
       // Mark processing as complete BEFORE calling callback
       this.isProcessingRecording = false;
+      
+      // CRITICAL: Reset isListening flag so a new cycle can start
+      // The recording has stopped and transcription is complete, so we're no longer actively listening
+      this.isListening = false;
+      LoggingService.debug('[SpeechRecognition] Recording and transcription complete, isListening set to false');
 
       // In continuous listening mode, process any speech (no wake word required)
       if (wasContinuous) {
@@ -619,6 +631,7 @@ class SpeechRecognitionService {
             LoggingService.warn('[SpeechRecognition] No callback registered for transcription result');
           }
           // Note: startListeningCycle will be called from the callback handler when ready
+          // The callback handler (ChatScreen) is responsible for restarting the cycle
         } else {
           LoggingService.debug('Empty transcript, ignoring');
           // Only restart if we're still in continuous mode and not processing
@@ -714,6 +727,23 @@ class SpeechRecognitionService {
    */
   async transcribeWithWhisper(audioUri) {
     try {
+      // Check if audio file exists and has content
+      try {
+        const fileInfo = await FileSystem.getInfoAsync(audioUri);
+        if (!fileInfo.exists) {
+          LoggingService.warn('Audio file does not exist:', audioUri);
+          throw new Error('Audio file not found');
+        }
+        if (fileInfo.size === 0) {
+          LoggingService.warn('Audio file is empty:', audioUri);
+          throw new Error('Audio file is empty');
+        }
+        LoggingService.debug('Audio file size:', fileInfo.size, 'bytes');
+      } catch (fileError) {
+        LoggingService.error('Error checking audio file:', fileError);
+        throw new Error(`Audio file error: ${fileError.message}`);
+      }
+
       // Create FormData for OpenAI API
       const formData = new FormData();
       
@@ -735,6 +765,8 @@ class SpeechRecognitionService {
       // Add model
       formData.append('model', 'whisper-1');
 
+      LoggingService.debug('Sending audio to Whisper API, file:', fileName);
+
       // Send to OpenAI Whisper API
       const response = await axios.post(
         'https://api.openai.com/v1/audio/transcriptions',
@@ -748,24 +780,211 @@ class SpeechRecognitionService {
         }
       );
 
-      // Extract transcript from response
-      const transcript = response.data?.text;
+      // Log response for debugging (but not the full response data)
+      LoggingService.debug('Whisper API response status:', response.status);
+      LoggingService.debug('Whisper API response data keys:', Object.keys(response.data || {}));
 
+      // Extract transcript from response
+      // Whisper API can return text directly or in a text field
+      let transcript = response.data?.text;
+      
+      // If no text field, check if response.data is a string
+      if (!transcript && typeof response.data === 'string') {
+        transcript = response.data;
+      }
+      
+      // If still no transcript, check for alternative response formats
+      if (!transcript && response.data) {
+        // Some APIs might return the transcript in different fields
+        transcript = response.data.transcript || response.data.transcription || response.data.result;
+      }
+
+      // Trim whitespace
       if (transcript) {
+        transcript = transcript.trim();
+      }
+
+      if (transcript && transcript.length > 0) {
         LoggingService.debug('Speech transcribed with Whisper:', transcript);
         return transcript;
       } else {
-        throw new Error('No transcript in Whisper API response');
+        // Empty transcript - might be silence or very short audio
+        LoggingService.warn('Whisper API returned empty transcript. Response:', JSON.stringify(response.data).substring(0, 200));
+        // Return empty string instead of throwing error - let the caller handle it
+        return '';
       }
     } catch (error) {
-      LoggingService.error('Error transcribing with Whisper:', error);
-      const errorMessage = error.response?.data?.error?.message || error.message || 'Failed to transcribe audio';
+      // Enhanced error logging
+      if (error.response) {
+        LoggingService.error('Whisper API error response:', {
+          status: error.response.status,
+          statusText: error.response.statusText,
+          data: error.response.data,
+        });
+      } else if (error.request) {
+        LoggingService.error('Whisper API request error - no response received:', error.message);
+      } else {
+        LoggingService.error('Whisper API error:', error.message);
+      }
+      
+      const errorMessage = error.response?.data?.error?.message || 
+                          error.message || 
+                          'Failed to transcribe audio';
       throw new Error(`Whisper API error: ${errorMessage}`);
     }
   }
 
   /**
-   * Check if text contains wake word "Hey, McCarthy" or "Hey McCarthy"
+   * Calculate Levenshtein distance between two strings (for fuzzy matching)
+   * @param {string} str1 - First string
+   * @param {string} str2 - Second string
+   * @returns {number} Edit distance
+   */
+  levenshteinDistance(str1, str2) {
+    const matrix = [];
+    const len1 = str1.length;
+    const len2 = str2.length;
+
+    // Initialize matrix
+    for (let i = 0; i <= len1; i++) {
+      matrix[i] = [i];
+    }
+    for (let j = 0; j <= len2; j++) {
+      matrix[0][j] = j;
+    }
+
+    // Fill matrix
+    for (let i = 1; i <= len1; i++) {
+      for (let j = 1; j <= len2; j++) {
+        if (str1[i - 1] === str2[j - 1]) {
+          matrix[i][j] = matrix[i - 1][j - 1];
+        } else {
+          matrix[i][j] = Math.min(
+            matrix[i - 1][j] + 1,     // deletion
+            matrix[i][j - 1] + 1,     // insertion
+            matrix[i - 1][j - 1] + 1  // substitution
+          );
+        }
+      }
+    }
+
+    return matrix[len1][len2];
+  }
+
+  /**
+   * Check if a word is similar to "mccarthy" using fuzzy matching
+   * Handles transcription errors like "MCOTC", "Kathy", "Cassie", "Epcotgy", "M Coffee", etc.
+   * @param {string} word - Word to check
+   * @returns {boolean}
+   */
+  isSimilarToMcCarthy(word) {
+    if (!word) return false;
+    
+    const normalized = word.toLowerCase().trim();
+    const target = 'mccarthy';
+    
+    // Exact match
+    if (normalized === target) return true;
+    
+    // Check for "carthy" (common transcription error - missing "Mc")
+    if (normalized.includes('carthy') && normalized.length >= 5) {
+      return true;
+    }
+    
+    // Phonetic variations that sound like "McCarthy"
+    // "Cassie" / "Cassie" - common transcription error
+    if (normalized === 'cassie' || normalized === 'cassy' || normalized === 'casi' || 
+        normalized.startsWith('cass') && normalized.length <= 7) {
+      return true;
+    }
+    
+    // "Scotty" / "Scotty" - phonetically similar to "McCarthy"
+    if (normalized === 'scotty' || normalized === 'scotti' || normalized === 'scotie' ||
+        normalized.startsWith('scott') && normalized.length <= 7) {
+      return true;
+    }
+    
+    // "Kathy" / "Kathi" - phonetically similar
+    if (normalized === 'kathy' || normalized === 'kathi' || normalized === 'kathie' ||
+        normalized.startsWith('kath') && normalized.length <= 7) {
+      return true;
+    }
+    
+    // "Epcotgy" - transcription error (sounds like "McCarthy")
+    if (normalized.includes('epcot') || normalized.includes('epcotgy') || 
+        normalized.includes('epcot') || normalized.startsWith('epcot')) {
+      return true;
+    }
+    
+    // "Coffee" when preceded by "M" - "M Coffee" sounds like "McCarthy"
+    if (normalized === 'coffee' || normalized === 'coffe' || normalized.startsWith('coff')) {
+      return true;
+    }
+    
+    // Check for "mc" followed by something similar to "carthy"
+    if (normalized.startsWith('mc') && normalized.length >= 4) {
+      const afterMc = normalized.substring(2);
+      // Handle variations like "MCOTC" (MC + OTC)
+      // Check if it's similar to "carthy" (allowing for typos)
+      if (afterMc.includes('carth') || afterMc.includes('crth') || 
+          afterMc.includes('carty') || afterMc.includes('otc') ||
+          afterMc.includes('arth') || afterMc.includes('rth') ||
+          afterMc.includes('coff') || afterMc.includes('epcot')) {
+        return true;
+      }
+      // If it's 3-6 characters after "mc", it might be a variation
+      if (afterMc.length >= 3 && afterMc.length <= 6) {
+        // Check Levenshtein distance for the part after "mc"
+        const mccarthyAfterMc = 'carthy';
+        const distance = this.levenshteinDistance(afterMc, mccarthyAfterMc);
+        if (distance <= 3) {
+          return true;
+        }
+      }
+    }
+    
+    // Check for words that start with "carth", "crth", "kath", "cass", "epcot" (phonetic variations)
+    if (normalized.startsWith('carth') || normalized.startsWith('crth') || 
+        normalized.startsWith('kath') || normalized.startsWith('carty') ||
+        normalized.startsWith('cass') || normalized.startsWith('epcot')) {
+      return true;
+    }
+    
+    // Fuzzy match using Levenshtein distance
+    // Allow up to 5 character differences for McCarthy (9 chars) - more lenient
+    const maxDistance = Math.max(4, Math.floor(normalized.length * 0.6));
+    const distance = this.levenshteinDistance(normalized, target);
+    
+    if (distance <= maxDistance) {
+      return true;
+    }
+    
+    // Check if word contains key parts of "mccarthy"
+    // Look for "carth", "crth", "kath", "cass", "epcot", "otc", "coff" patterns (phonetic matches)
+    if (normalized.includes('carth') || normalized.includes('crth') || 
+        normalized.includes('carty') || normalized.includes('carthy') ||
+        normalized.includes('kath') || normalized.includes('otc') ||
+        normalized.includes('cass') || normalized.includes('epcot') ||
+        normalized.includes('coff')) {
+      return true;
+    }
+    
+    // Special case: Short words that might be McCarthy variations
+    // "MCOTC", "Cassie", "Kathy", etc.
+    if (normalized.length >= 4 && normalized.length <= 8) {
+      // For short words that might be McCarthy variations
+      const shortDistance = this.levenshteinDistance(normalized, target);
+      if (shortDistance <= 5) {
+        return true;
+      }
+    }
+    
+    return false;
+  }
+
+  /**
+   * Check if text contains wake word "Hey, McCarthy" or variations
+   * Handles transcription errors like "I am Carthy", "M Crthy", "Hey MCOTC", "Hey, I'm Kathy", etc.
    * @param {string} text - Text to check
    * @returns {boolean}
    */
@@ -776,21 +995,104 @@ class SpeechRecognitionService {
     const normalizedText = text.toLowerCase().trim().replace(/\s+/g, ' ');
     
     // Remove commas, periods, and other punctuation for flexible matching
-    // This handles "hey mccarthy", "hey, mccarthy", "hey. mccarthy", etc.
-    const textWithoutPunctuation = normalizedText.replace(/[,.\-!?]/g, ' ').replace(/\s+/g, ' ').trim();
+    const textWithoutPunctuation = normalizedText.replace(/[,.\-!?']/g, ' ').replace(/\s+/g, ' ').trim();
     
-    // Check if text starts with "hey mccarthy" (most common case)
-    // Also check if it appears early in the text (within first 30 characters after normalization)
-    const wakeWordPattern = 'hey mccarthy';
-    const wakeWordIndex = textWithoutPunctuation.indexOf(wakeWordPattern);
+    // First, try exact match for "hey mccarthy" (most common case)
+    const exactPattern = 'hey mccarthy';
+    const exactIndex = textWithoutPunctuation.indexOf(exactPattern);
+    if (exactIndex === 0 || (exactIndex > 0 && exactIndex < 30)) {
+      return true;
+    }
     
-    // Wake word should be at the start or appear early in the text
-    // This ensures "Hey, McCarthy, can you..." is detected but "Can you say Hey, McCarthy" is not
-    return wakeWordIndex === 0 || (wakeWordIndex > 0 && wakeWordIndex < 30);
+    // Split text into words for analysis
+    const words = textWithoutPunctuation.split(/\s+/).filter(w => w.length > 0);
+    
+    // Look for "McCarthy" variations in the first few words (wake word should be early)
+    // Check first 6 words for McCarthy-like patterns (increased from 5 to catch "Hey, I'm Kathy")
+    const wordsToCheck = words.slice(0, 6);
+    
+    for (let i = 0; i < wordsToCheck.length; i++) {
+      const word = wordsToCheck[i];
+      
+      // Check if this word is similar to "mccarthy"
+      if (this.isSimilarToMcCarthy(word)) {
+        // Found a McCarthy-like word early in the text
+        // This could be the wake word even if "Hey" was transcribed incorrectly
+        // Examples: "I am Carthy", "M Crthy", "How are you Carthy", "Hey MCOTC", "Hey, I'm Kathy"
+        
+        // If it's in the first 3 words, it's very likely the wake word
+        if (i < 3) {
+          return true;
+        }
+        
+        // If it's in position 3-5, check if there's a greeting-like word before it
+        // Common transcription errors for "Hey": "I", "M", "How", "Hi", "I'm", etc.
+        const prevWord = i > 0 ? wordsToCheck[i - 1] : '';
+        const prevPrevWord = i > 1 ? wordsToCheck[i - 2] : '';
+        const greetingWords = ['hey', 'hi', 'i', 'm', 'im', 'how', 'a', 'am', 'are', 'you'];
+        
+        // Check if previous word is a greeting, or if we have "I'm" or "I am" pattern
+        if (greetingWords.includes(prevWord) || 
+            greetingWords.includes(prevPrevWord) ||
+            prevWord.length <= 2 ||
+            (prevWord === 'im' && prevPrevWord === 'i')) {
+          return true;
+        }
+      }
+    }
+    
+    // Also check for "hey" followed by something similar to "mccarthy" (even if not adjacent)
+    // This handles "Hey MCOTC", "Hey, I'm Kathy", "Hey M Coffee", "Hey, I'm Cassie", etc.
+    const heyIndex = textWithoutPunctuation.indexOf('hey');
+    if (heyIndex >= 0 && heyIndex < 30) {
+      // Found "hey" early, check if there's a McCarthy-like word nearby
+      const afterHey = textWithoutPunctuation.substring(heyIndex + 3).trim();
+      const wordsAfterHey = afterHey.split(/\s+/).filter(w => w.length > 0).slice(0, 5); // Check next 5 words
+      
+      // Check each word after "hey"
+      for (const word of wordsAfterHey) {
+        if (this.isSimilarToMcCarthy(word)) {
+          return true;
+        }
+      }
+      
+      // Also check for patterns like "Hey, I'm Kathy" or "Hey M Coffee" where words are between "Hey" and McCarthy
+      // Look for "im", "i", "am", "m" followed by a McCarthy-like word
+      for (let i = 0; i < wordsAfterHey.length - 1; i++) {
+        const currentWord = wordsAfterHey[i];
+        const nextWord = wordsAfterHey[i + 1];
+        
+        // If we see "im", "i", "am", "m" followed by a McCarthy-like word
+        // Examples: "Hey, I'm Cassie", "Hey M Coffee"
+        if ((currentWord === 'im' || currentWord === 'i' || currentWord === 'am' || currentWord === 'm') &&
+            this.isSimilarToMcCarthy(nextWord)) {
+          return true;
+        }
+      }
+      
+      // Check for "Hey" followed by "M" and then "Coffee" (two words: "M Coffee")
+      // This handles "Hey M Coffee" transcription
+      if (wordsAfterHey.length >= 2) {
+        const firstWord = wordsAfterHey[0];
+        const secondWord = wordsAfterHey[1];
+        if ((firstWord === 'm' || firstWord === 'im' || firstWord === 'i') &&
+            this.isSimilarToMcCarthy(secondWord)) {
+          return true;
+        }
+      }
+    }
+    
+    // Special case: Check if text starts with a McCarthy-like word (very likely wake word)
+    if (words.length > 0 && this.isSimilarToMcCarthy(words[0])) {
+      return true;
+    }
+    
+    return false;
   }
 
   /**
    * Extract question from text after wake word
+   * Handles transcription variations of the wake word
    * @param {string} text - Full transcribed text
    * @returns {string} Question text (without wake word)
    */
@@ -798,17 +1100,45 @@ class SpeechRecognitionService {
     if (!text) return '';
     
     const normalizedText = text.toLowerCase();
-    const wakeWord = 'hey mccarthy';
-    const wakeWordIndex = normalizedText.indexOf(wakeWord);
+    const words = normalizedText.split(/\s+/);
     
-    if (wakeWordIndex === -1) {
-      return text; // No wake word found, return original
+    // First, try exact match for "hey mccarthy"
+    const exactWakeWord = 'hey mccarthy';
+    const exactIndex = normalizedText.indexOf(exactWakeWord);
+    if (exactIndex !== -1) {
+      const afterWakeWord = text.substring(exactIndex + exactWakeWord.length).trim();
+      return afterWakeWord.replace(/^[,.\s]+/, '').trim();
     }
     
-    // Extract text after wake word
-    const afterWakeWord = text.substring(wakeWordIndex + wakeWord.length).trim();
+    // Find McCarthy-like word in the text
+    let mccarthyIndex = -1;
+    for (let i = 0; i < Math.min(words.length, 5); i++) {
+      if (this.isSimilarToMcCarthy(words[i])) {
+        mccarthyIndex = i;
+        break;
+      }
+    }
     
-    // Remove any leading punctuation or "hey" variations
+    if (mccarthyIndex === -1) {
+      // No wake word found, return original text
+      return text;
+    }
+    
+    // Extract text after the McCarthy-like word
+    // Find the position in the original text
+    let charIndex = 0;
+    for (let i = 0; i < mccarthyIndex; i++) {
+      charIndex += words[i].length + 1; // +1 for space
+    }
+    
+    // Find the end of the McCarthy word
+    const mccarthyWord = words[mccarthyIndex];
+    const endOfMcCarthy = charIndex + mccarthyWord.length;
+    
+    // Extract everything after the McCarthy word
+    const afterWakeWord = text.substring(endOfMcCarthy).trim();
+    
+    // Remove any leading punctuation, spaces, or common filler words
     return afterWakeWord.replace(/^[,.\s]+/, '').trim();
   }
 
@@ -844,6 +1174,18 @@ class SpeechRecognitionService {
    * Reset all processing flags (useful when wake word is not detected and we need to restart)
    */
   resetAllProcessingFlags() {
+    this.isProcessingResult = false;
+    this.isProcessingRecording = false;
+    this.speechDetected = false;
+  }
+
+  /**
+   * Force reset listening state - useful when restarting after wake word detection
+   * This ensures isListening is false so a new cycle can start
+   */
+  forceResetListeningState() {
+    LoggingService.debug('[SpeechRecognition] Force resetting listening state');
+    this.isListening = false;
     this.isProcessingResult = false;
     this.isProcessingRecording = false;
     this.speechDetected = false;
