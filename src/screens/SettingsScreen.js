@@ -20,6 +20,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  Switch,
 } from 'react-native';
 import { useTranslation } from 'react-i18next';
 
@@ -37,6 +38,7 @@ const SettingsScreen = () => {
   const [lastName, setLastName] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [timezone, setTimezone] = useState('Australia/Sydney');
+  const [wakeWordEnabled, setWakeWordEnabled] = useState(true);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -57,6 +59,7 @@ const SettingsScreen = () => {
       
       setPhoneNumber(userData.phoneNumber || '');
       setTimezone(userData.timezone || 'Australia/Sydney');
+      setWakeWordEnabled(userData.voiceSettings?.wakeWordEnabled !== false); // Default to true if not set
     }
   }, [userData]);
 
@@ -78,11 +81,19 @@ const SettingsScreen = () => {
       const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
       
       // Update profile via Dartmouth API
+      // Note: wakeWordEnabled is NOT saved here - it's handled separately when toggle changes
       const updatedProfile = await DartmouthAPI.updateProfile({
         name: fullName,
         phoneNumber: phoneNumber.trim() || null,
         timezone: timezone,
       });
+
+      // Verify voiceSettings were saved correctly
+      if (updatedProfile?.voiceSettings) {
+        LoggingService.debug('Profile updated with voiceSettings:', updatedProfile.voiceSettings);
+      } else {
+        LoggingService.warn('Profile updated but voiceSettings not found in response');
+      }
 
       // Update context with new profile data
       setUserData(updatedProfile);
@@ -92,9 +103,107 @@ const SettingsScreen = () => {
       Alert.alert('Success', 'Profile updated successfully!');
     } catch (error) {
       LoggingService.error('Error updating profile:', error);
+      
+      // Check if it's an auth error
+      if (error.message?.includes('session has expired') || error.message?.includes('Unauthorized')) {
+        Alert.alert(
+          'Session Expired',
+          'Your session has expired. Please log in again.',
+          [
+            {
+              text: 'OK',
+              onPress: () => {
+                // Don't automatically logout - let the user decide
+                // The error message is clear enough
+              },
+            },
+          ]
+        );
+      } else {
+        Alert.alert(
+          'Error',
+          `Failed to update profile: ${error.message}`
+        );
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleWakeWordToggleChange = (newValue) => {
+    // Show alert asking for relogin
+    Alert.alert(
+      'Relogin Required',
+      'Changing the wake word setting requires you to relogin for the changes to take effect. Do you want to save this change and relogin?',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+          onPress: () => {
+            // Revert the toggle to previous value
+            setWakeWordEnabled(!newValue);
+          },
+        },
+        {
+          text: 'Relogin',
+          style: 'default',
+          onPress: async () => {
+            // Save the setting and logout
+            await handleWakeWordSaveAndLogout(newValue);
+          },
+        },
+      ]
+    );
+  };
+
+  const handleWakeWordSaveAndLogout = async (newWakeWordValue) => {
+    setSaving(true);
+    
+    try {
+      // Merge voiceSettings to preserve existing settings (ttsEnabled, ttsSpeed, etc.)
+      const currentVoiceSettings = userData?.voiceSettings || {};
+      const voiceSettingsUpdate = {
+        ...currentVoiceSettings,
+        wakeWordEnabled: newWakeWordValue,
+      };
+      
+      LoggingService.debug('Saving wake word setting before logout:', voiceSettingsUpdate);
+      
+      // Save only the voiceSettings
+      const updatedProfile = await DartmouthAPI.updateProfile({
+        voiceSettings: voiceSettingsUpdate,
+      });
+
+      // Verify voiceSettings were saved correctly
+      if (updatedProfile?.voiceSettings) {
+        LoggingService.debug('Wake word setting saved:', updatedProfile.voiceSettings);
+      } else {
+        LoggingService.warn('Wake word setting saved but not found in response');
+      }
+
+      // Update context with new profile data
+      setUserData(updatedProfile);
+
+      LoggingService.debug('Wake word setting saved successfully, logging out...');
+
+      // Logout via Dartmouth API
+      await DartmouthAPI.logout();
+      
+      // Clear user state
+      setUser(null);
+      setUserData(null);
+      setIsAuthenticated(false);
+      
+      LoggingService.debug('Logout successful after wake word change');
+    } catch (error) {
+      LoggingService.error('Error saving wake word setting:', error);
+      
+      // Revert the toggle on error
+      setWakeWordEnabled(!newWakeWordValue);
+      
       Alert.alert(
         'Error',
-        `Failed to update profile: ${error.message}`
+        `Failed to save wake word setting: ${error.message}`
       );
     } finally {
       setSaving(false);
@@ -203,6 +312,28 @@ const SettingsScreen = () => {
             <Text style={styles.helpText}>
               Your timezone helps McCarthy schedule reminders and notifications at the right time.
             </Text>
+          </View>
+
+          {/* Voice Settings Section */}
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Voice Settings</Text>
+            
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleLabelContainer}>
+                <Text style={styles.label}>Wake Word Required</Text>
+                <Text style={styles.helpText}>
+                  When enabled, you must say "Hey, McCarthy" to activate voice chat. When disabled, voice chat starts immediately.
+                </Text>
+              </View>
+              <Switch
+                value={wakeWordEnabled}
+                onValueChange={handleWakeWordToggleChange}
+                trackColor={{ false: '#E5E5EA', true: '#34C759' }}
+                thumbColor="#FFFFFF"
+                ios_backgroundColor="#E5E5EA"
+                disabled={saving}
+              />
+            </View>
 
             <TouchableOpacity
               style={[styles.saveButton, saving && styles.saveButtonDisabled]}
@@ -325,6 +456,17 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '600',
+  },
+  toggleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 15,
+    paddingVertical: 10,
+  },
+  toggleLabelContainer: {
+    flex: 1,
+    marginRight: 15,
   },
 });
 

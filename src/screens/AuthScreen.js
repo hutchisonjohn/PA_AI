@@ -64,8 +64,19 @@ const AuthScreen = () => {
           email: result.user.email,
         });
         
-        // Set user data
-        setUserData(result.user);
+        // Fetch full profile to ensure we have all settings including voiceSettings
+        try {
+          const fullProfile = await DartmouthAPI.getProfile();
+          console.log('Full profile loaded after login:', {
+            hasVoiceSettings: !!fullProfile.voiceSettings,
+            voiceSettings: fullProfile.voiceSettings,
+          });
+          setUserData(fullProfile);
+        } catch (profileError) {
+          console.warn('Failed to load full profile after login, using login response:', profileError.message);
+          // Fallback to user data from login response
+          setUserData(result.user);
+        }
         
         // Set authenticated state
         setIsAuthenticated(true);

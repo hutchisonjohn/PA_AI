@@ -16,6 +16,7 @@ import { doc, onSnapshot } from 'firebase/firestore';
 import { auth, firestore } from '../config/firebase';
 import FeatureFlagService from '../services/FeatureFlagService';
 import LoggingService from '../services/LoggingService';
+import DartmouthAPI from '../services/DartmouthAPIService';
 
 const AppContext = createContext(null);
 
@@ -59,6 +60,76 @@ export const AppProvider = ({ children }) => {
 
   // Track if we're using Dartmouth API auth (manual auth) vs Firebase auth
   const isDartmouthAuthRef = React.useRef(false);
+
+  // Check for existing Dartmouth API token on app startup
+  useEffect(() => {
+    const checkDartmouthAuth = async () => {
+      try {
+        const token = await DartmouthAPI.getToken();
+        if (token) {
+          LoggingService.debug('Found existing Dartmouth token, verifying...');
+          
+          // Try to get profile to verify token is still valid
+          try {
+            const profile = await DartmouthAPI.getProfile();
+            
+            if (profile && profile.id) {
+              LoggingService.debug('Dartmouth token is valid, restoring session');
+              
+              // Mark that we're using Dartmouth API auth
+              isDartmouthAuthRef.current = true;
+              
+              // Restore user state
+              setUser({
+                uid: profile.id,
+                email: profile.email,
+              });
+              
+              // Restore user data
+              setUserData(profile);
+              
+              // Set authenticated state
+              setIsAuthenticated(true);
+              
+              // Set current group ID if available
+              if (profile.defaultGroupId) {
+                setCurrentGroupId(profile.defaultGroupId);
+              } else if (profile.groupIds && profile.groupIds.length > 0) {
+                setCurrentGroupId(profile.groupIds[0]);
+              }
+              
+              // Update settings from user data
+              if (profile.timezone) setSettings(prev => ({ ...prev, timezone: profile.timezone }));
+              if (profile.currency) setSettings(prev => ({ ...prev, currency: profile.currency }));
+              if (profile.locale) setSettings(prev => ({ ...prev, locale: profile.locale }));
+              
+              LoggingService.debug('Session restored successfully');
+              setIsLoading(false);
+              return; // Exit early since we restored the session
+            } else {
+              LoggingService.debug('Profile data invalid, clearing token');
+              await DartmouthAPI.clearToken();
+            }
+          } catch (error) {
+            // Token is invalid or expired
+            LoggingService.debug('Dartmouth token verification failed:', error.message);
+            await DartmouthAPI.clearToken();
+          }
+        }
+      } catch (error) {
+        LoggingService.error('Error checking Dartmouth auth:', error);
+      } finally {
+        // Only set loading to false if we didn't restore a session
+        // If we restored a session, loading was already set to false above
+        if (!isDartmouthAuthRef.current) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    // Always check Dartmouth auth on startup (runs in parallel with Firebase auth check)
+    checkDartmouthAuth();
+  }, []);
 
   // Listen to authentication state changes (only for Firebase auth)
   useEffect(() => {

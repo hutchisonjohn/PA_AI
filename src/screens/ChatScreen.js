@@ -203,21 +203,32 @@ const ChatScreen = () => {
           return;
         }
 
+        // Check if wake word is enabled
+        const wakeWordEnabled = userData?.voiceSettings?.wakeWordEnabled !== false; // Default to true if not set
+        
         // Start continuous listening
-        setVoiceStatus('waiting');
-        voiceStatusRef.current = 'waiting';
+        // If wake word is disabled, start in "available" state immediately
+        // If wake word is enabled, start in "waiting" state and require wake word
+        if (wakeWordEnabled) {
+          setVoiceStatus('waiting');
+          voiceStatusRef.current = 'waiting';
+          isFirstWakeUpRef.current = true; // Reset wake-up flag
+        } else {
+          setVoiceStatus('available');
+          voiceStatusRef.current = 'available';
+          isFirstWakeUpRef.current = false; // No wake word needed
+        }
         shouldListenRef.current = true;
-        isFirstWakeUpRef.current = true; // Reset wake-up flag
         await SpeechRecognitionService.startContinuousListening(
           // onSpeechDetected: When user starts speaking (audio detected)
           () => {
-            // First wake-up: waiting → available
-            if (shouldListenRef.current && isFirstWakeUpRef.current) {
-              LoggingService.debug('[ChatScreen] First wake-up detected, switching to available');
-              setVoiceStatus('available');
-              voiceStatusRef.current = 'available';
-              setIsListening(false);
-              isFirstWakeUpRef.current = false;
+            // Check if wake word is enabled
+            const wakeWordEnabled = userData?.voiceSettings?.wakeWordEnabled !== false; // Default to true if not set
+            
+            // When in "waiting" state (only if wake word is enabled): Don't change status yet - wait for wake word confirmation in onResult
+            if (wakeWordEnabled && shouldListenRef.current && voiceStatusRef.current === 'waiting') {
+              LoggingService.debug('[ChatScreen] Speech detected in waiting state - will check for wake word');
+              // Don't change status here - wait for transcription to verify wake word
             } 
             // When in "available" state and user starts speaking: available → listening
             else if (shouldListenRef.current && voiceStatusRef.current === 'available') {
@@ -231,21 +242,65 @@ const ChatScreen = () => {
           async (recognizedText) => {
             LoggingService.debug('[ChatScreen] Transcription received:', recognizedText, 'Current status:', voiceStatusRef.current);
             
-            // FIRST WAKE-UP: waiting → available (ignore transcription)
-            if (isFirstWakeUpRef.current) {
-              LoggingService.debug('[ChatScreen] First wake-up transcription ignored, staying in available');
-              setVoiceStatus('available');
-              voiceStatusRef.current = 'available';
-              setIsListening(false);
-              isFirstWakeUpRef.current = false;
-              SpeechRecognitionService.resetProcessingFlag();
-              // Restart listening for next input
-              setTimeout(() => {
-                if (shouldListenRef.current && !isFirstWakeUpRef.current) {
-                  SpeechRecognitionService.startListeningCycle();
+            // Check if wake word is enabled
+            const wakeWordEnabled = userData?.voiceSettings?.wakeWordEnabled !== false; // Default to true if not set
+            
+            // WAITING STATE: Only transition to "available" if wake word "Hey, McCarthy" is detected
+            // Skip this check if wake word is disabled
+            if (wakeWordEnabled && (voiceStatusRef.current === 'waiting' || isFirstWakeUpRef.current)) {
+              // Check if the recognized text contains the wake word
+              const hasWakeWord = SpeechRecognitionService.containsWakeWord(recognizedText);
+              
+              if (hasWakeWord) {
+                LoggingService.debug('[ChatScreen] Wake word "Hey, McCarthy" detected, transitioning to available');
+                setVoiceStatus('available');
+                voiceStatusRef.current = 'available';
+                setIsListening(false);
+                isFirstWakeUpRef.current = false;
+                SpeechRecognitionService.resetProcessingFlag();
+                // Restart listening for next input (now in available state)
+                setTimeout(() => {
+                  if (shouldListenRef.current && !isFirstWakeUpRef.current) {
+                    SpeechRecognitionService.startListeningCycle();
+                  }
+                }, 500);
+                return;
+              } else {
+                // Wake word not detected - stay in waiting, ignore this transcription
+                LoggingService.debug('[ChatScreen] Wake word not detected in:', recognizedText, '- staying in waiting state');
+                isFirstWakeUpRef.current = false; // Reset flag so we can try again
+                
+                // Reset all processing flags to ensure clean state
+                SpeechRecognitionService.resetAllProcessingFlags();
+                
+                // Stop current listening to ensure clean state before restarting
+                // This ensures we can listen again even if service thinks it's still listening
+                try {
+                  await SpeechRecognitionService.stopListening();
+                } catch (error) {
+                  LoggingService.debug('[ChatScreen] Error stopping listening (non-critical):', error);
                 }
-              }, 500);
-              return;
+                
+                // Restart listening cycle to continue waiting for wake word
+                // Use a longer delay to ensure service is fully stopped
+                setTimeout(async () => {
+                  if (shouldListenRef.current && voiceStatusRef.current === 'waiting') {
+                    LoggingService.debug('[ChatScreen] Restarting listening cycle after wake word not detected');
+                    try {
+                      await SpeechRecognitionService.startListeningCycle();
+                    } catch (error) {
+                      LoggingService.error('[ChatScreen] Error restarting listening cycle:', error);
+                      // Try again after another delay
+                      setTimeout(async () => {
+                        if (shouldListenRef.current && voiceStatusRef.current === 'waiting') {
+                          await SpeechRecognitionService.startListeningCycle();
+                        }
+                      }, 2000);
+                    }
+                  }
+                }, 1500); // Give it more time to fully stop and reset
+                return;
+              }
             }
             
             // Check if we should process

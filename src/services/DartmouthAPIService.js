@@ -290,7 +290,16 @@ class DartmouthAPIService {
         headers,
       });
 
-      return response.data.user;
+      const user = response.data.user;
+      
+      // Log voiceSettings to verify they're loaded correctly
+      if (user?.voiceSettings) {
+        console.log('[Dartmouth API] Profile loaded with voiceSettings:', user.voiceSettings);
+      } else {
+        console.log('[Dartmouth API] Profile loaded but no voiceSettings found');
+      }
+
+      return user;
     } catch (error) {
       console.error('[Dartmouth API] Get profile error:', error.message);
       if (error.response) {
@@ -308,6 +317,13 @@ class DartmouthAPIService {
   async updateProfile(updates) {
     try {
       const headers = await this.getAuthHeaders();
+      
+      // Log what we're sending for debugging
+      console.log('[Dartmouth API] Updating profile with:', {
+        ...updates,
+        voiceSettings: updates.voiceSettings ? JSON.stringify(updates.voiceSettings) : undefined,
+      });
+      
       const response = await this.axios.put(
         '/api/pa-ai/profile',
         updates,
@@ -317,9 +333,26 @@ class DartmouthAPIService {
         }
       );
 
+      // Log the response to verify voiceSettings were saved
+      console.log('[Dartmouth API] Profile updated successfully:', {
+        hasVoiceSettings: !!response.data?.user?.voiceSettings,
+        voiceSettings: response.data?.user?.voiceSettings,
+      });
+
       return response.data.user;
     } catch (error) {
-      console.error('[Dartmouth API] Update profile error:', error.message);
+      console.error('[Dartmouth API] Update profile error:', {
+        message: error.message,
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        data: error.response?.data,
+      });
+      
+      // Handle 401 (Unauthorized) - token might be expired
+      if (error.response?.status === 401) {
+        throw new Error('Your session has expired. Please log in again.');
+      }
+      
       if (error.response) {
         const errorData = error.response.data;
         throw new Error(errorData?.error || `HTTP ${error.response.status}: ${error.response.statusText}`);

@@ -765,18 +765,28 @@ class SpeechRecognitionService {
   }
 
   /**
-   * Check if text contains wake word "Hey McCarthy"
+   * Check if text contains wake word "Hey, McCarthy" or "Hey McCarthy"
    * @param {string} text - Text to check
    * @returns {boolean}
    */
   containsWakeWord(text) {
     if (!text) return false;
     
-    const normalizedText = text.toLowerCase().trim();
-    const wakeWord = 'hey mccarthy';
+    // Normalize text: lowercase, remove extra spaces, handle punctuation
+    const normalizedText = text.toLowerCase().trim().replace(/\s+/g, ' ');
     
-    // Check if wake word is in the text
-    return normalizedText.includes(wakeWord);
+    // Remove commas, periods, and other punctuation for flexible matching
+    // This handles "hey mccarthy", "hey, mccarthy", "hey. mccarthy", etc.
+    const textWithoutPunctuation = normalizedText.replace(/[,.\-!?]/g, ' ').replace(/\s+/g, ' ').trim();
+    
+    // Check if text starts with "hey mccarthy" (most common case)
+    // Also check if it appears early in the text (within first 30 characters after normalization)
+    const wakeWordPattern = 'hey mccarthy';
+    const wakeWordIndex = textWithoutPunctuation.indexOf(wakeWordPattern);
+    
+    // Wake word should be at the start or appear early in the text
+    // This ensures "Hey, McCarthy, can you..." is detected but "Can you say Hey, McCarthy" is not
+    return wakeWordIndex === 0 || (wakeWordIndex > 0 && wakeWordIndex < 30);
   }
 
   /**
@@ -831,6 +841,15 @@ class SpeechRecognitionService {
   }
 
   /**
+   * Reset all processing flags (useful when wake word is not detected and we need to restart)
+   */
+  resetAllProcessingFlags() {
+    this.isProcessingResult = false;
+    this.isProcessingRecording = false;
+    this.speechDetected = false;
+  }
+
+  /**
    * Stop listening for speech
    * This also resets flags to ensure clean state for restart
    */
@@ -842,6 +861,7 @@ class SpeechRecognitionService {
     this.isListening = false;
     this.speechDetected = false;
     this.isProcessingResult = false;
+    this.isProcessingRecording = false; // Also reset processing recording flag
     
     if (!wasListening) {
       LoggingService.debug('[SpeechRecognition] Not listening, but flags reset for clean state');
