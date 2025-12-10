@@ -39,7 +39,7 @@ class SpeechRecognitionService {
     this.recording = null; // expo-av recording instance
     this.isProcessingRecording = false; // Flag to prevent duplicate processing
     this.silenceTimeout = null; // Timeout for silence detection
-    this.silenceDuration = 2000; // 2 seconds of silence to stop recording
+    this.silenceDuration = 800; // 0.8 seconds of silence to stop recording (optimized for speed)
     this.isProcessingResult = false; // Flag to prevent processing multiple results simultaneously
     
     // Get OpenAI API key (same one used for LLM)
@@ -132,22 +132,22 @@ class SpeechRecognitionService {
       return;
     }
 
-    // If still processing, wait a bit and try again
+    // If still processing, wait a bit and try again (optimized for speed)
     if (this.isProcessingRecording) {
       LoggingService.debug('[SpeechRecognition] Still processing recording, will retry later');
       setTimeout(() => {
         if (this.isContinuousListening && !this.isListening) {
           this.startListeningCycle();
         }
-      }, 1000);
+      }, 500);
       return;
     }
 
     // Reset processing flag for new cycle
     this.isProcessingResult = false;
 
-    // Wait a bit before starting next cycle to avoid immediate restart
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // Wait a bit before starting next cycle to avoid immediate restart (optimized for speed)
+    await new Promise(resolve => setTimeout(resolve, 200));
 
     if (!this.isContinuousListening) {
       LoggingService.debug('[SpeechRecognition] Continuous mode disabled during wait, skipping');
@@ -180,25 +180,25 @@ class SpeechRecognitionService {
             this.continuousOnErrorCallback(error);
           }
           // Restart listening cycle even on error (for continuous mode)
-          // Only restart if still in continuous mode and not processing
+          // Only restart if still in continuous mode and not processing (optimized for speed)
           if (this.isContinuousListening && !this.isProcessingRecording) {
             setTimeout(() => {
               if (this.isContinuousListening && !this.isListening && !this.isProcessingRecording) {
                 this.startListeningCycle();
               }
-            }, 1000);
+            }, 500);
           }
         }
       );
     } catch (error) {
       LoggingService.error('Error starting listening cycle:', error);
-      // Restart after error if still in continuous mode
+      // Restart after error if still in continuous mode (optimized for speed)
       if (this.isContinuousListening && !this.isProcessingRecording) {
         setTimeout(() => {
           if (this.isContinuousListening && !this.isListening && !this.isProcessingRecording) {
             this.startListeningCycle();
           }
-        }, 2000);
+        }, 800);
       }
     }
   }
@@ -431,7 +431,7 @@ class SpeechRecognitionService {
             clearTimeout(this.silenceTimeout);
             this.silenceTimeout = null;
           }
-          // Set timeout for silence detection (stop after 2 seconds of silence)
+          // Set timeout for silence detection (optimized for speed)
           // Clear any existing silence timeout first
           if (this.silenceTimeout) {
             clearTimeout(this.silenceTimeout);
@@ -470,7 +470,7 @@ class SpeechRecognitionService {
         clearInterval(pollInterval);
         this.recordingPollInterval = null;
       }
-    }, 200); // Poll every 200ms
+    }, 150); // Poll every 150ms (optimized for faster wake word detection)
 
     // Store interval ID for cleanup
     this.recordingPollInterval = pollInterval;

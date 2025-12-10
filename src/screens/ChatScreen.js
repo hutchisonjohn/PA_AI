@@ -342,7 +342,7 @@ const ChatScreen = () => {
                 
                 // CRITICAL: Restart listening cycle to continue listening for user's question
                 // The continuous listening needs to restart after processing the wake word transcription
-                // Use a delay to ensure the callback has fully completed and service state is reset
+                // Use a delay to ensure the callback has fully completed and service state is reset (optimized for speed)
                 setTimeout(async () => {
                   LoggingService.debug('[ChatScreen] Attempting to restart listening after wake word. Conditions:', {
                     isVoiceEnabled,
@@ -357,23 +357,23 @@ const ChatScreen = () => {
                       // This is necessary because the service might still think it's listening
                       SpeechRecognitionService.forceResetListeningState();
                       
-                      // Small additional delay to ensure service state is fully reset
-                      await new Promise(resolve => setTimeout(resolve, 300));
+                      // Small additional delay to ensure service state is fully reset (optimized for speed)
+                      await new Promise(resolve => setTimeout(resolve, 150));
                       
                       LoggingService.debug('[ChatScreen] Restarting listening cycle after wake word detection');
                       await SpeechRecognitionService.startListeningCycle();
                       LoggingService.debug('[ChatScreen] Listening cycle restarted successfully');
                     } catch (error) {
                       LoggingService.error('[ChatScreen] Error restarting listening after wake word:', error);
-                      // Try again after delay with another reset
+                      // Try again after delay with another reset (optimized for speed)
                       setTimeout(async () => {
                         if (isVoiceEnabled && shouldListenRef.current && voiceStatusRef.current === 'available') {
                           SpeechRecognitionService.forceResetListeningState();
-                          await new Promise(resolve => setTimeout(resolve, 400));
+                          await new Promise(resolve => setTimeout(resolve, 200));
                           LoggingService.debug('[ChatScreen] Retrying listening cycle restart');
                           await SpeechRecognitionService.startListeningCycle();
                         }
-                      }, 1500);
+                      }, 800);
                     }
                   } else {
                     LoggingService.warn('[ChatScreen] Cannot restart listening - conditions not met:', {
@@ -382,7 +382,7 @@ const ChatScreen = () => {
                       status: voiceStatusRef.current
                     });
                   }
-                }, 1500); // Longer delay to ensure previous processing is fully complete and service state is reset
+                }, 600); // Optimized delay for faster wake word detection (reduced from 1500ms)
                 
                 LoggingService.debug('[ChatScreen] Wake word detected - ready to listen for user question. Status: available, shouldListen:', shouldListenRef.current);
                 return;
@@ -403,7 +403,7 @@ const ChatScreen = () => {
                 }
                 
                 // Restart listening cycle to continue waiting for wake word
-                // Use a longer delay to ensure service is fully stopped
+                // Use a delay to ensure service is fully stopped (optimized for speed)
                 setTimeout(async () => {
                   if (isVoiceEnabled && shouldListenRef.current && voiceStatusRef.current === 'waiting') {
                     LoggingService.debug('[ChatScreen] Restarting listening cycle after wake word not detected');
@@ -411,15 +411,15 @@ const ChatScreen = () => {
                       await SpeechRecognitionService.startListeningCycle();
                     } catch (error) {
                       LoggingService.error('[ChatScreen] Error restarting listening cycle:', error);
-                      // Try again after another delay
+                      // Try again after another delay (optimized for speed)
                       setTimeout(async () => {
                         if (isVoiceEnabled && shouldListenRef.current && voiceStatusRef.current === 'waiting') {
                           await SpeechRecognitionService.startListeningCycle();
                         }
-                      }, 2000);
+                      }, 1000);
                     }
                   }
-                }, 1500); // Give it more time to fully stop and reset
+                }, 600); // Optimized delay for faster wake word detection (reduced from 1500ms)
                 return;
               }
             }
